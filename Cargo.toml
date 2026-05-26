@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "orbit-rs",
+    "orbit-metrics",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+authors = ["ilker Arabaci <iadeveloper@hotmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/iadev09/orbit"
+
+[workspace.dependencies]
+bytemuck = { version = "1.23", features = ["derive"] }
+bytes = "1.11"
+dashmap = "6.1"
+libc = "0.2"
+netid64 = "0.1.1"
+nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }
+tracing = "0.1.44"
