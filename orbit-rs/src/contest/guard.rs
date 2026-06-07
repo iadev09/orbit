@@ -11,9 +11,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::contest::fence::FenceToken;
 use crate::error::{Error, Result};
 use crate::fleet::Fleet;
 use crate::id::NetId64;
+use crate::ring::cursor::{RingCursor, RingLoss};
 use crate::typed::OrbitTyped;
 
 /// Contest frame payload limit for V0. On Unix this matches the SHM ring
@@ -26,9 +28,20 @@ pub const CONTEST_PAYLOAD_MAX: usize = 256;
 pub const CONTEST_RING_KIND: u8 = 222;
 pub const CONTEST_FRAME_KIND_CLAIM: u8 = 1;
 pub const CONTEST_FRAME_KIND_RELEASE: u8 = 2;
+pub const CONTEST_FRAME_KIND_RENEW: u8 = 3;
 
 const CLAIM_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 8;
 const RELEASE_HEADER_LEN: usize = 8 + 1 + 2;
+const RENEW_HEADER_LEN: usize = 8 + 8 + 1 + 2;
+
+/// Bounded loss-driven re-polls a claim performs before deciding, when the
+/// ring window has torn/uncommitted slots that could hide an earlier claim.
+/// Each retry is a fresh poll separated only by a cooperative `yield_now` —
+/// never a timed sleep — so `try_claim` blocks no thread and is safe to call
+/// directly from an async runtime. A torn seqlock write commits in
+/// nanoseconds, so a few yields settle it; a slot that never commits is a
+/// crashed mid-write (no real claim) and the caller proceeds.
+const CLAIM_SETTLE_ATTEMPTS: u32 = 3;
 
 /// Dedicated ring record marker for contest frames.
 #[derive(Clone, Debug)]
@@ -160,21 +173,58 @@ impl Contest {
             self.fleet
                 .publish::<ContestRecord>(CONTEST_FRAME_KIND_CLAIM, now_ms, payload);
 
-        let Some(holder) = self.active_holder(&subject, now_ms) else {
-            return Ok(Claim::YieldTo(Holder {
-                claim_id,
-                subject,
-                owner,
-                claimed_at_ms: now_ms,
-                expires_at_ms,
-            }));
-        };
-
-        if holder.claim_id.counter() == claim_id.counter() {
-            Ok(Claim::Claimed(Guard::new(self.clone(), holder)))
-        } else {
-            let _ = self.release_id(&subject, claim_id, now_ms);
-            Ok(Claim::YieldTo(holder))
+        // Decide against a loss-aware view of the ring window. A bare snapshot
+        // can mistake a lower, not-yet-readable claim for "absent" and hand two
+        // peers the same subject; see FINDINGS "CONTEST (claude ultra)".
+        //
+        // - A strictly-earlier *visible* claim -> yield (any loss is moot:
+        //   we lose regardless).
+        // - We are the earliest visible claim on a clean window -> Claimed.
+        // - `unavailable` loss (a torn / uncommitted slot) -> re-poll a bounded
+        //   number of times, separated by a cooperative yield (never a sleep —
+        //   async-safe); each retry re-scans the window so the torn slot is
+        //   re-read once it commits. A slot that never commits is a crashed
+        //   mid-write, i.e. not a real claim, so we may proceed.
+        //
+        // `poll_active` scans only the resident window from its floor, so normal
+        // history aging is never mistaken for loss. A live claim pushed out of
+        // the capacity-sized window by extreme write volume is a documented
+        // limit, backed by fencing tokens ([`crate::contest::fence`]) at the
+        // protected resource.
+        let mut attempt: u32 = 0;
+        loop {
+            let (earliest, loss) = self.poll_active(&subject, now_ms);
+            match earliest {
+                Some(holder) if holder.claim_id.counter() != claim_id.counter() => {
+                    let _ = self.release_id(&subject, claim_id, now_ms);
+                    return Ok(Claim::YieldTo(holder));
+                }
+                Some(holder) => {
+                    if loss.unavailable > 0 && attempt < CLAIM_SETTLE_ATTEMPTS {
+                        attempt += 1;
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    return Ok(Claim::Claimed(Guard::new(self.clone(), holder)));
+                }
+                None => {
+                    if loss.unavailable > 0 && attempt < CLAIM_SETTLE_ATTEMPTS {
+                        attempt += 1;
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    // Subject is free but our own claim is not observable
+                    // (e.g. ttl == 0 born-expired). Preserve the prior
+                    // YieldTo(self) contract for that degenerate case.
+                    return Ok(Claim::YieldTo(Holder {
+                        claim_id,
+                        subject: subject.clone(),
+                        owner: owner.clone(),
+                        claimed_at_ms: now_ms,
+                        expires_at_ms,
+                    }));
+                }
+            }
         }
     }
 
@@ -209,17 +259,48 @@ impl Contest {
             .publish::<ContestRecord>(CONTEST_FRAME_KIND_RELEASE, now_ms, payload))
     }
 
-    fn active_holder(&self, subject: &ContestSubject, now_ms: u64) -> Option<Holder> {
-        let mut cursor = self.fleet.cursor_from_start::<ContestRecord>();
+    fn renew_id(
+        &self,
+        subject: &ContestSubject,
+        claim_id: NetId64,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<NetId64> {
+        let payload = encode_renew(subject.kind, subject.as_bytes(), claim_id, expires_at_ms)?;
+        Ok(self
+            .fleet
+            .publish::<ContestRecord>(CONTEST_FRAME_KIND_RENEW, now_ms, payload))
+    }
+
+    /// Reconstruct the earliest active claim for `subject` from the ring,
+    /// together with any window loss observed during the walk.
+    ///
+    /// The loss is load-bearing: a caller must not treat "no holder found"
+    /// as "subject free" when frames that could carry an earlier claim were
+    /// overwritten or were momentarily unreadable.
+    fn poll_active(&self, subject: &ContestSubject, now_ms: u64) -> (Option<Holder>, RingLoss) {
+        // Scan only the resident window, starting at its floor (head -
+        // capacity). Starting from counter 0 would make `poll_ring` report the
+        // entire scrolled-out history as `overwritten` — that is normal ring
+        // aging, NOT a lost-frame signal, and on a mature ring it is always
+        // non-zero, so it must never be treated as a loss. From the floor,
+        // `overwritten` is structurally 0; only `unavailable` (torn /
+        // uncommitted slots) is a real loss signal.
+        let head = self.fleet.head::<ContestRecord>();
+        let capacity = self.fleet.ring_capacity::<ContestRecord>() as u64;
+        let mut cursor = RingCursor::from_counter(head.saturating_sub(capacity));
         let poll = self.fleet.poll_ring::<ContestRecord>(&mut cursor);
+        let loss = RingLoss {
+            overwritten: 0,
+            unavailable: poll.loss.unavailable,
+        };
         let mut active = BTreeMap::<u64, Holder>::new();
 
         for frame in poll.frames {
             match decode_frame(frame.kind, &frame.payload) {
                 Some(DecodedContestFrame::Claim(decoded))
                     if decoded.subject_kind == subject.kind
-                        && decoded.subject == subject.as_bytes()
-                        && decoded.expires_at_ms > now_ms =>
+                        && decoded.subject == subject.as_bytes() =>
                 {
                     active.insert(
                         frame.id.counter(),
@@ -235,6 +316,20 @@ impl Contest {
                         },
                     );
                 }
+                Some(DecodedContestFrame::Renew(decoded))
+                    if decoded.subject_kind == subject.kind
+                        && decoded.subject == subject.as_bytes() =>
+                {
+                    // Extend the existing tenure in place — same counter, so
+                    // the holder keeps its earliest-claim position. A renewal
+                    // whose original CLAIM has already scrolled out of the
+                    // capacity-sized window is unreconstructable here (the
+                    // documented eviction limit); with a large window this does
+                    // not arise for a tenure renewing within its TTL.
+                    if let Some(holder) = active.get_mut(&decoded.claim_id.counter()) {
+                        holder.expires_at_ms = holder.expires_at_ms.max(decoded.expires_at_ms);
+                    }
+                }
                 Some(DecodedContestFrame::Release(decoded))
                     if decoded.subject_kind == subject.kind
                         && decoded.subject == subject.as_bytes() =>
@@ -245,7 +340,11 @@ impl Contest {
             }
         }
 
-        active.into_values().next()
+        // Expiry is evaluated after renewals, so a renewed lease that
+        // outlived its original TTL is not dropped.
+        active.retain(|_, holder| holder.expires_at_ms > now_ms);
+
+        (active.into_values().next(), loss)
     }
 }
 
@@ -329,6 +428,17 @@ impl Guard {
         self.holder.claim_id
     }
 
+    /// A monotonic fencing token for this tenure (Kleppmann). Pass it with
+    /// every write to the protected resource and gate that resource with a
+    /// [`crate::contest::fence::Fence`]: a stalled holder that resumes after
+    /// its lease expired carries a lower token and is rejected, keeping the
+    /// resource safe even if mutual exclusion momentarily slipped. The token
+    /// is the per-ring claim counter — strictly higher for each successive
+    /// winner — so it is the transient tenure's identity, not a rank.
+    pub fn fence_token(&self) -> FenceToken {
+        FenceToken::new(self.holder.claim_id.counter())
+    }
+
     pub fn subject(&self) -> &ContestSubject {
         &self.holder.subject
     }
@@ -339,6 +449,30 @@ impl Guard {
 
     pub fn expires_at_ms(&self) -> u64 {
         self.holder.expires_at_ms
+    }
+
+    /// Extend this tenure's lease by `ttl` from now, without minting a new
+    /// claim — the holder keeps its earliest-claim position. Publishes a
+    /// renewal frame and advances the in-memory expiry. Call before the
+    /// current lease elapses (e.g. at `ttl/3`) when work outlives one TTL,
+    /// so a live holder is not revoked mid-flight. Renewal only extends the
+    /// current tenure; it never accumulates rank.
+    pub fn renew(&mut self, ttl: Duration) -> Result<NetId64> {
+        self.renew_at(ttl, now_ms())
+    }
+
+    /// [`Self::renew`] with an explicit clock, for deterministic tests and
+    /// embedders with their own time source.
+    pub fn renew_at(&mut self, ttl: Duration, now_ms: u64) -> Result<NetId64> {
+        let expires_at_ms = expires_at(now_ms, ttl);
+        let id = self.contest.renew_id(
+            &self.holder.subject,
+            self.holder.claim_id,
+            expires_at_ms,
+            now_ms,
+        )?;
+        self.holder.expires_at_ms = expires_at_ms;
+        Ok(id)
     }
 
     /// Explicitly release the claim before this guard leaves scope.
@@ -399,9 +533,17 @@ struct DecodedRelease<'a> {
     claim_id: NetId64,
 }
 
+struct DecodedRenew<'a> {
+    subject_kind: u8,
+    subject: &'a [u8],
+    claim_id: NetId64,
+    expires_at_ms: u64,
+}
+
 enum DecodedContestFrame<'a> {
     Claim(DecodedClaim<'a>),
     Release(DecodedRelease<'a>),
+    Renew(DecodedRenew<'a>),
 }
 
 fn encode_claim(
@@ -452,10 +594,35 @@ fn encode_release(subject_kind: u8, subject: &[u8], claim_id: NetId64) -> Result
     Ok(buf.freeze())
 }
 
+fn encode_renew(
+    subject_kind: u8,
+    subject: &[u8],
+    claim_id: NetId64,
+    expires_at_ms: u64,
+) -> Result<Bytes> {
+    let total = RENEW_HEADER_LEN + subject.len();
+    if subject.len() > u16::MAX as usize || total > CONTEST_PAYLOAD_MAX {
+        return Err(Error::ContestFrameTooLarge {
+            subject_len: subject.len(),
+            owner_len: 0,
+            max_payload: CONTEST_PAYLOAD_MAX,
+        });
+    }
+
+    let mut buf = BytesMut::with_capacity(total);
+    buf.put_u64_le(claim_id.raw());
+    buf.put_u64_le(expires_at_ms);
+    buf.put_u8(subject_kind);
+    buf.put_u16_le(subject.len() as u16);
+    buf.put_slice(subject);
+    Ok(buf.freeze())
+}
+
 fn decode_frame(frame_kind: u8, payload: &Bytes) -> Option<DecodedContestFrame<'_>> {
     match frame_kind {
         CONTEST_FRAME_KIND_CLAIM => decode_claim(payload).map(DecodedContestFrame::Claim),
         CONTEST_FRAME_KIND_RELEASE => decode_release(payload).map(DecodedContestFrame::Release),
+        CONTEST_FRAME_KIND_RENEW => decode_renew(payload).map(DecodedContestFrame::Renew),
         _ => None,
     }
 }
@@ -507,6 +674,29 @@ fn decode_release(payload: &Bytes) -> Option<DecodedRelease<'_>> {
     })
 }
 
+fn decode_renew(payload: &Bytes) -> Option<DecodedRenew<'_>> {
+    if payload.len() < RENEW_HEADER_LEN {
+        return None;
+    }
+
+    let claim_id = NetId64::from_raw(u64::from_le_bytes(payload[0..8].try_into().ok()?));
+    let expires_at_ms = u64::from_le_bytes(payload[8..16].try_into().ok()?);
+    let subject_kind = payload[16];
+    let subject_len = u16::from_le_bytes(payload[17..19].try_into().ok()?) as usize;
+    let subject_start = RENEW_HEADER_LEN;
+    let subject_end = subject_start.checked_add(subject_len)?;
+    if payload.len() < subject_end {
+        return None;
+    }
+
+    Some(DecodedRenew {
+        subject_kind,
+        subject: &payload[subject_start..subject_end],
+        claim_id,
+        expires_at_ms,
+    })
+}
+
 fn expires_at(now_ms: u64, ttl: Duration) -> u64 {
     let ttl_ms = ttl.as_millis().min(u128::from(u64::MAX)) as u64;
     now_ms.saturating_add(ttl_ms)
@@ -518,7 +708,6 @@ fn now_ms() -> u64 {
         .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -662,5 +851,113 @@ mod tests {
             panic!("released yielding claim should not block");
         };
         assert_eq!(guard.owner().as_str(), "worker:3");
+    }
+
+    #[test]
+    fn renewed_claim_survives_past_original_ttl() {
+        let fleet = Arc::new(Fleet::join("contest_renew", 2).expect("fleet"));
+        let claims = Contest::new(fleet);
+
+        let Claim::Claimed(mut guard) = claims
+            .try_claim_at::<OriginProbe>(
+                "origin:tcp_1",
+                "worker:1",
+                Duration::from_millis(10),
+                1_000,
+            )
+            .expect("claim")
+        else {
+            panic!("expected initial claim");
+        };
+
+        // Renew before the original 1_010 expiry, extending to 1_015.
+        guard.renew_at(Duration::from_millis(10), 1_005).expect("renew");
+        assert_eq!(guard.expires_at_ms(), 1_015);
+
+        // A contender at 1_012: the original TTL (1_010) has elapsed, but the
+        // renewal keeps worker:1 the holder, on its original earliest claim.
+        let second = claims
+            .try_claim_at::<OriginProbe>("origin:tcp_1", "worker:2", Duration::from_secs(30), 1_012)
+            .expect("second claim");
+        let Claim::YieldTo(holder) = second else {
+            panic!("renewed claim must still hold the subject");
+        };
+        assert_eq!(holder.owner.as_str(), "worker:1");
+        assert_eq!(holder.expires_at_ms, 1_015);
+
+        // Past the renewed expiry, the subject is contestable again.
+        let third = claims
+            .try_claim_at::<OriginProbe>("origin:tcp_1", "worker:3", Duration::from_secs(30), 1_020)
+            .expect("third claim");
+        let Claim::Claimed(guard3) = third else {
+            panic!("expired renewed claim should not block");
+        };
+        assert_eq!(guard3.owner().as_str(), "worker:3");
+    }
+
+    #[test]
+    fn fence_rejects_superseded_holder() {
+        use crate::contest::fence::Fence;
+
+        let fleet = Arc::new(Fleet::join("contest_fence", 2).expect("fleet"));
+        let claims = Contest::new(fleet);
+        let fence = Fence::new();
+
+        let Claim::Claimed(g1) = claims
+            .try_claim_at::<OriginProbe>("origin:tcp_1", "worker:1", Duration::from_millis(5), 1_000)
+            .expect("claim")
+        else {
+            panic!("expected initial claim");
+        };
+        let t1 = g1.fence_token();
+        assert!(fence.admit(t1)); // worker:1 writes under its tenure
+
+        // worker:1 stalls and loses the lease (released here for the test);
+        // worker:2 takes over.
+        drop(g1);
+        let Claim::Claimed(g2) = claims
+            .try_claim_at::<OriginProbe>("origin:tcp_1", "worker:2", Duration::from_secs(30), 1_010)
+            .expect("claim2")
+        else {
+            panic!("expected takeover claim");
+        };
+        let t2 = g2.fence_token();
+        assert!(t2 > t1, "a successive winner must carry a higher token");
+        assert!(fence.admit(t2)); // new holder accepted
+
+        // Stale worker:1 wakes up and tries to write with its old token.
+        assert!(
+            !fence.admit(t1),
+            "a superseded holder must be fenced out at the resource"
+        );
+    }
+
+    #[test]
+    fn claim_succeeds_after_ring_wraps_past_capacity() {
+        let fleet = Arc::new(Fleet::join("contest_wrap", 2).expect("fleet"));
+        let claims = Contest::new(fleet);
+
+        // Churn the shared contest ring well past its capacity so the write
+        // head sits far above the window floor. Structural history aging must
+        // NOT be mistaken for lost frames: a claim must still succeed (the
+        // pre-fix code fail-closed here on every call once head > capacity).
+        let mut now = 1_000u64;
+        for _ in 0..700 {
+            if let Claim::Claimed(g) = claims
+                .try_claim_at::<OriginProbe>("churn", "w", Duration::from_secs(30), now)
+                .expect("churn claim")
+            {
+                g.release().expect("churn release");
+            }
+            now += 1;
+        }
+
+        let fresh = claims
+            .try_claim_at::<OtherProbe>("fresh", "winner", Duration::from_secs(30), now)
+            .expect("fresh claim");
+        let Claim::Claimed(guard) = fresh else {
+            panic!("claim after the ring wrapped past capacity must be Claimed");
+        };
+        assert_eq!(guard.owner().as_str(), "winner");
     }
 }

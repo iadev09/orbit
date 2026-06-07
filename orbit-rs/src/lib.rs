@@ -68,9 +68,11 @@ pub mod ring_shm {
 
 #[cfg(unix)]
 pub use cache::{CACHE_PAYLOAD_MAX, OrbitCache, OrbitCacheEntry, OrbitCacheRead};
+pub use contest::fence::{Fence, FenceToken};
 pub use contest::guard::{
-    CONTEST_FRAME_KIND_CLAIM, CONTEST_FRAME_KIND_RELEASE, CONTEST_PAYLOAD_MAX, CONTEST_RING_KIND,
-    Claim, Contest, ContestOwner, ContestRecord, ContestSubject, ContestType, Guard, Holder,
+    CONTEST_FRAME_KIND_CLAIM, CONTEST_FRAME_KIND_RELEASE, CONTEST_FRAME_KIND_RENEW,
+    CONTEST_PAYLOAD_MAX, CONTEST_RING_KIND, Claim, Contest, ContestOwner, ContestRecord,
+    ContestSubject, ContestType, Guard, Holder,
 };
 pub use error::{Error, Result};
 pub use event::{

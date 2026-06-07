@@ -38,7 +38,8 @@ Typical use cases:
   It is a use-case crate, not part of the primitive core.
 
 `orbit-rs` uses [`netid64`](https://github.com/iadev09/netid64) for
-runtime-bound frame identifiers.
+runtime-bound frame identifiers: "valid for life" means valid for the
+life of the runtime that minted the frame.
 
 ## orbit-metrics Use Case
 
