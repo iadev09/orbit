@@ -1,16 +1,5 @@
 //! `Fleet` — the per-process handle that represents membership in
 //! a fleet of peers.
-//!
-//! See VISION.md §6 (lifetime — virtual, network-aware) and §7.5
-//! (FleetHandle — membership layer).
-//!
-//! V0 contract: joining yields a `NodeId` and gives the holder access to
-//! type-keyed rings. A fleet can be process-local or backed by POSIX
-//! shared memory; the public API is the same either way.
-//!
-//! Three Musketeers: every member is equal. The fleet does not track
-//! a "leader". Whatever role hierarchy the embedder cares about
-//! (master vs worker, primary vs replica) lives outside this crate.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +14,7 @@ use crate::id::NetId64;
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
 use crate::ring::{Frame, Ring, RingRegistry};
 use crate::tick::OrbitEpoch;
-use crate::typed::OrbitTyped;
+use crate::OrbitTyped;
 
 mod cursor;
 pub mod heartbeat;

@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 use crate::fleet::{Fleet, NodeId};
 use crate::id::NetId64;
 use crate::ring::cursor::RingCursor;
-use crate::typed::OrbitTyped;
+use crate::OrbitTyped;
 
 /// Event frame payload limit for V0. On Unix this matches the SHM
 /// ring's fixed slot payload size; non-Unix keeps the same contract so

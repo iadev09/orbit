@@ -41,36 +41,3 @@ Typical use cases:
 runtime-bound frame identifiers: "valid for life" means valid for the
 life of the runtime that minted the frame.
 
-## orbit-metrics Use Case
-
-`orbit-metrics` models periodic measurements as compact snapshots over
-Orbit rings.
-
-Hot paths should update process-local counters or atomics. A background
-publisher captures a compact snapshot and writes it to an Orbit ring.
-Collectors then read the ring and keep the newest valid sample per node
-or per metric key.
-
-```text
-worker-local counters
-  -> compact snapshot
-  -> OrbitMetricPublisher<T>
-  -> orbit-rs ring
-  -> OrbitMetricCollector<T>
-  -> newest sample per node/key
-```
-
-This is useful for worker health, runtime gauges, aggregation decisions,
-and dashboards where stale samples should be ignored instead of replayed.
-
-## Layout
-
-```text
-Cargo.toml              workspace only; not published as a crate
-orbit-rs/               crates.io package: orbit-rs
-orbit-metrics/          crates.io package: orbit-metrics
-```
-
-`orbit-rs` must remain framework-agnostic. Application lifecycle,
-runtime adapters, handlers, and product policy live above the primitive
-layer.

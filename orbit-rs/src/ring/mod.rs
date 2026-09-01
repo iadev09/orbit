@@ -55,7 +55,7 @@ use bytes::Bytes;
 
 use crate::NodeId;
 use crate::id::NetId64;
-use crate::typed::OrbitTyped;
+use crate::OrbitTyped;
 
 pub mod cursor;
 #[cfg(unix)]

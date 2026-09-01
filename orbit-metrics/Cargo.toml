@@ -1,6 +1,6 @@
 [package]
 name = "orbit-metrics"
-version = "0.1.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 description = "Metrics snapshot families over orbit-rs rings."
@@ -11,4 +11,4 @@ documentation = "https://docs.rs/orbit-metrics"
 
 [dependencies]
 bytes.workspace = true
-orbit-rs = { version = "0.1.0", path = "../orbit-rs" }
+orbit-rs = { version = "0.2.1", path = "../orbit-rs" }

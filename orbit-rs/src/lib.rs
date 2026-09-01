@@ -1,36 +1,9 @@
 //! # `orbit-rs` — fleet-aware shared-memory rings
 //!
-//! See the repository `VISION.md` for the broader design direction.
-//!
 //! ## What this crate is
 //!
 //! Fleet-shared, network-aware ring storage — the same-host tier between
-//! APCu (per-worker) and Redis (cross-host).
-//!
-//! ```text
-//! local var       — register-fast,    no sharing
-//! APCu            — process-fast,     per-worker
-//! Orbit           — fleet-shared,     same-host    ← here
-//! Redis           — cluster-shared,   cross-host
-//! PostgreSQL      — durable,          cross-time
-//! ```
-//!
-//! ## What this crate is NOT
-//!
-//! - **Not bound to any application framework.** The crate exposes
-//!   runtime primitives; framework-specific wiring belongs in adapter
-//!   crates above it.
-//! - **Not a service.** Orbit has its own fleet handle, but no
-//!   application lifecycle.
-//! - **Not a database or message broker.** The crate exposes rings and
-//!   small substrates such as `OrbitCache`; product-facing services live
-//!   in adapters above it.
-//!
-//! ## Three Musketeers
-//!
-//! > *Hepimiz birimiz, birimiz hepimiz. — Dumas*
-//! >
-//! > *All for one, one for all.*
+//! workers
 //!
 //! Every process in the fleet is an equal member. There is no master,
 //! no worker — only peers. Whatever role distinction matters to the
@@ -52,7 +25,6 @@ pub mod ring;
 #[cfg(unix)]
 pub mod shm;
 pub mod tick;
-pub mod typed;
 
 pub mod id {
     //! Re-export of the standalone `netid64` primitive.
@@ -87,4 +59,13 @@ pub use orbital::Orbital;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, poll_ring};
 pub use ring::{Frame, Ring};
 pub use tick::OrbitEpoch;
-pub use typed::OrbitTyped;
+
+/// Marker for a type that has a stable wire identity across the fleet.
+///
+/// Required bounds:
+/// - `Clone` — values may be delivered to multiple subscribers / nodes.
+/// - `Send + Sync + 'static` — values cross thread / process boundaries.
+pub trait OrbitTyped: Clone + Send + Sync + 'static {
+    /// Stable wire identifier. Hand-picked in V0; build.rs-generated later.
+    const KIND: u8;
+}

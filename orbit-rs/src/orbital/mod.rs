@@ -31,7 +31,7 @@ use bytes::Bytes;
 
 use crate::fleet::Fleet;
 use crate::id::NetId64;
-use crate::typed::OrbitTyped;
+use crate::OrbitTyped;
 
 /// Typed handle into the fleet's ring for type `T`.
 ///

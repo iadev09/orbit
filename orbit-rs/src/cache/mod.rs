@@ -37,10 +37,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::fleet::Fleet;
 use crate::id::NetId64;
-use crate::typed::OrbitTyped;
 
 /// Cache frame payload limit for V0. On Unix this matches the SHM
 /// ring's fixed slot payload size; non-Unix keeps the same contract so

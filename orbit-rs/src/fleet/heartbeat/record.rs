@@ -1,4 +1,4 @@
-use crate::typed::OrbitTyped;
+use crate::OrbitTyped;
 
 /// Core Orbit heartbeat ring.
 ///

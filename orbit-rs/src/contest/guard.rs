@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::fleet::Fleet;
 use crate::id::NetId64;
 use crate::ring::cursor::{RingCursor, RingLoss};
-use crate::typed::OrbitTyped;
+use crate::OrbitTyped;
 
 /// Contest frame payload limit for V0. On Unix this matches the SHM ring
 /// slot payload size; non-Unix keeps the same bounded contract.
