@@ -23,6 +23,7 @@ pub mod event;
 pub mod fleet;
 pub mod orbital;
 pub mod ring;
+pub mod rpc;
 #[cfg(unix)]
 pub mod shm;
 
@@ -60,6 +61,11 @@ pub use id::{NetId64, ParseNetId64Error};
 pub use orbital::Orbital;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, poll_ring};
 pub use ring::{Frame, Ring, RingSpec};
+pub use rpc::{
+    OrbitRpc, OrbitRpcCall, OrbitRpcClient, OrbitRpcLane, OrbitRpcOutcome, OrbitRpcReply,
+    OrbitRpcReplyCursor, OrbitRpcReplyPoll, OrbitRpcRequest, OrbitRpcRequestCursor,
+    OrbitRpcRequestPoll,
+};
 
 /// Marker for a type that has a stable wire identity across the fleet.
 ///

@@ -34,6 +34,14 @@ pub enum Error {
         max_payload: usize,
     },
 
+    /// An RPC request or reply could not fit into its lane payload.
+    RpcFrameTooLarge {
+        frame: &'static str,
+        method_len: usize,
+        payload_len: usize,
+        max_payload: usize,
+    },
+
     /// Shared-memory ring operation failed.
     Io(std::io::Error),
 }
@@ -75,6 +83,17 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "orbit contest frame too large: subject_len={subject_len} owner_len={owner_len} max_payload={max_payload}"
+                )
+            }
+            Self::RpcFrameTooLarge {
+                frame,
+                method_len,
+                payload_len,
+                max_payload,
+            } => {
+                write!(
+                    f,
+                    "orbit RPC {frame} frame too large: method_len={method_len} payload_len={payload_len} max_payload={max_payload}"
                 )
             }
             Self::Io(err) => write!(f, "orbit io error: {err}"),
