@@ -5,7 +5,7 @@
 //! and carries a correlation id that a reply must echo.
 //!
 //! Application request and reply types do not implement
-//! [`crate::OrbitTyped`]. An [`OrbitRpcLane`] declares exactly two
+//! [`crate::OrbitTyped`]. A [`Lane`] declares exactly two
 //! physical ring kinds for an RPC domain: one request lane and one reply
 //! lane. Typed codecs and handler registration belong above this raw
 //! byte protocol.
@@ -35,7 +35,7 @@ const REPLY_HEADER_LEN: usize = 1 + 1 + 8 + 4;
 /// this trait. Individual methods carried by that domain are identified
 /// by their method name inside the request payload; they do not allocate
 /// more SHM segments.
-pub trait OrbitRpcLane: Send + Sync + 'static {
+pub trait Lane: Send + Sync + 'static {
     const REQUEST_RING_KIND: u8;
     const REQUEST_RING_SPEC: RingSpec;
     const REPLY_RING_KIND: u8;
@@ -50,7 +50,7 @@ impl<L> Clone for RpcRequestRecord<L> {
     }
 }
 
-impl<L: OrbitRpcLane> OrbitTyped for RpcRequestRecord<L> {
+impl<L: Lane> OrbitTyped for RpcRequestRecord<L> {
     const KIND: u8 = L::REQUEST_RING_KIND;
     const RING_SPEC: RingSpec = L::REQUEST_RING_SPEC;
 }
@@ -63,26 +63,26 @@ impl<L> Clone for RpcReplyRecord<L> {
     }
 }
 
-impl<L: OrbitRpcLane> OrbitTyped for RpcReplyRecord<L> {
+impl<L: Lane> OrbitTyped for RpcReplyRecord<L> {
     const KIND: u8 = L::REPLY_RING_KIND;
     const RING_SPEC: RingSpec = L::REPLY_RING_SPEC;
 }
 
 /// Caller-owned position in one RPC request stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OrbitRpcRequestCursor {
+pub struct RequestCursor {
     inner: RingCursor,
 }
 
 /// Caller-owned position in one RPC reply stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OrbitRpcReplyCursor {
+pub struct ReplyCursor {
     inner: RingCursor,
 }
 
 /// One decoded RPC request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OrbitRpcRequest {
+pub struct Incoming {
     /// Correlation id minted by the request ring write.
     pub id: NetId64,
     pub from: NodeId,
@@ -95,13 +95,13 @@ pub struct OrbitRpcRequest {
 /// Terminal outcome reported by an RPC handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum OrbitRpcOutcome {
+pub enum Outcome {
     Completed = 1,
     Rejected = 2,
     Failed = 3,
 }
 
-impl OrbitRpcOutcome {
+impl Outcome {
     fn from_wire(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::Completed),
@@ -114,23 +114,23 @@ impl OrbitRpcOutcome {
 
 /// One decoded RPC reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OrbitRpcReply {
+pub struct Response {
     pub id: NetId64,
     pub request_id: NetId64,
     pub from: NodeId,
-    pub outcome: OrbitRpcOutcome,
+    pub outcome: Outcome,
     pub payload: Bytes,
     pub timestamp_ms: u64,
 }
 
 /// Result of advancing an RPC request cursor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OrbitRpcRequestPoll {
-    pub requests: Vec<OrbitRpcRequest>,
+pub struct RequestPoll {
+    pub requests: Vec<Incoming>,
     pub lagged: u64,
 }
 
-impl OrbitRpcRequestPoll {
+impl RequestPoll {
     pub fn is_empty(&self) -> bool {
         self.requests.is_empty() && self.lagged == 0
     }
@@ -138,24 +138,24 @@ impl OrbitRpcRequestPoll {
 
 /// Result of advancing an RPC reply cursor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OrbitRpcReplyPoll {
-    pub replies: Vec<OrbitRpcReply>,
+pub struct ReplyPoll {
+    pub replies: Vec<Response>,
     pub lagged: u64,
 }
 
-impl OrbitRpcReplyPoll {
+impl ReplyPoll {
     pub fn is_empty(&self) -> bool {
         self.replies.is_empty() && self.lagged == 0
     }
 }
 
 /// Raw fleet RPC transport. Cheap to clone.
-pub struct OrbitRpc<L: OrbitRpcLane> {
+pub struct Endpoint<L: Lane> {
     fleet: Arc<Fleet>,
     _lane: PhantomData<L>,
 }
 
-impl<L: OrbitRpcLane> Clone for OrbitRpc<L> {
+impl<L: Lane> Clone for Endpoint<L> {
     fn clone(&self) -> Self {
         Self {
             fleet: self.fleet.clone(),
@@ -164,7 +164,7 @@ impl<L: OrbitRpcLane> Clone for OrbitRpc<L> {
     }
 }
 
-impl<L: OrbitRpcLane> OrbitRpc<L> {
+impl<L: Lane> Endpoint<L> {
     pub fn new(fleet: Arc<Fleet>) -> Self {
         assert_ne!(
             L::REQUEST_RING_KIND,
@@ -182,29 +182,29 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
     }
 
     /// Start after every request currently retained in the lane.
-    pub fn request_cursor_at_head(&self) -> OrbitRpcRequestCursor {
-        OrbitRpcRequestCursor {
+    pub fn request_cursor_at_head(&self) -> RequestCursor {
+        RequestCursor {
             inner: self.fleet.cursor_at_head::<RpcRequestRecord<L>>(),
         }
     }
 
     /// Replay request history still retained by the ring.
-    pub fn request_cursor_from_start(&self) -> OrbitRpcRequestCursor {
-        OrbitRpcRequestCursor {
+    pub fn request_cursor_from_start(&self) -> RequestCursor {
+        RequestCursor {
             inner: self.fleet.cursor_from_start::<RpcRequestRecord<L>>(),
         }
     }
 
     /// Start after every reply currently retained in the lane.
-    pub fn reply_cursor_at_head(&self) -> OrbitRpcReplyCursor {
-        OrbitRpcReplyCursor {
+    pub fn reply_cursor_at_head(&self) -> ReplyCursor {
+        ReplyCursor {
             inner: self.fleet.cursor_at_head::<RpcReplyRecord<L>>(),
         }
     }
 
     /// Replay reply history still retained by the ring.
-    pub fn reply_cursor_from_start(&self) -> OrbitRpcReplyCursor {
-        OrbitRpcReplyCursor {
+    pub fn reply_cursor_from_start(&self) -> ReplyCursor {
+        ReplyCursor {
             inner: self.fleet.cursor_from_start::<RpcReplyRecord<L>>(),
         }
     }
@@ -238,8 +238,8 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
     /// Publish a terminal reply for `request`.
     pub fn reply(
         &self,
-        request: &OrbitRpcRequest,
-        outcome: OrbitRpcOutcome,
+        request: &Incoming,
+        outcome: Outcome,
         payload: impl AsRef<[u8]>,
     ) -> Result<NetId64> {
         self.publish_reply(request.id, outcome, payload)
@@ -249,7 +249,7 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
     pub fn publish_reply(
         &self,
         request_id: NetId64,
-        outcome: OrbitRpcOutcome,
+        outcome: Outcome,
         payload: impl AsRef<[u8]>,
     ) -> Result<NetId64> {
         let timestamp_ms = OrbitEpoch::now().as_unix_ms();
@@ -263,7 +263,7 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
     ///
     /// The cursor advances past requests for other nodes as well; every
     /// node must therefore own an independent request cursor.
-    pub fn poll_requests(&self, cursor: &mut OrbitRpcRequestCursor) -> OrbitRpcRequestPoll {
+    pub fn poll_requests(&self, cursor: &mut RequestCursor) -> RequestPoll {
         let ring_poll = self
             .fleet
             .poll_ring::<RpcRequestRecord<L>>(&mut cursor.inner);
@@ -282,7 +282,7 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
             if decoded.target != self.node_id() {
                 continue;
             }
-            requests.push(OrbitRpcRequest {
+            requests.push(Incoming {
                 id: frame.id,
                 from: NodeId::new(frame.id.node()),
                 target: decoded.target,
@@ -292,11 +292,11 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
             });
         }
 
-        OrbitRpcRequestPoll { requests, lagged }
+        RequestPoll { requests, lagged }
     }
 
     /// Poll every decoded reply in the shared reply lane.
-    pub fn poll_replies(&self, cursor: &mut OrbitRpcReplyCursor) -> OrbitRpcReplyPoll {
+    pub fn poll_replies(&self, cursor: &mut ReplyCursor) -> ReplyPoll {
         let ring_poll = self.fleet.poll_ring::<RpcReplyRecord<L>>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
         let mut replies = Vec::new();
@@ -310,7 +310,7 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
                 lagged = lagged.saturating_add(1);
                 continue;
             };
-            replies.push(OrbitRpcReply {
+            replies.push(Response {
                 id: frame.id,
                 request_id: decoded.request_id,
                 from: NodeId::new(frame.id.node()),
@@ -320,12 +320,12 @@ impl<L: OrbitRpcLane> OrbitRpc<L> {
             });
         }
 
-        OrbitRpcReplyPoll { replies, lagged }
+        ReplyPoll { replies, lagged }
     }
 }
 
 struct PendingState {
-    reply: Option<OrbitRpcReply>,
+    reply: Option<Response>,
     waker: Option<Waker>,
 }
 
@@ -345,7 +345,7 @@ impl PendingReply {
         }
     }
 
-    fn complete(&self, reply: OrbitRpcReply) {
+    fn complete(&self, reply: Response) {
         let waker = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.reply = Some(reply);
@@ -357,9 +357,9 @@ impl PendingReply {
     }
 }
 
-struct RpcClientInner<L: OrbitRpcLane> {
-    rpc: OrbitRpc<L>,
-    reply_cursor: Mutex<OrbitRpcReplyCursor>,
+struct RpcClientInner<L: Lane> {
+    rpc: Endpoint<L>,
+    reply_cursor: Mutex<ReplyCursor>,
     pending: Mutex<HashMap<NetId64, Arc<PendingReply>>>,
 }
 
@@ -368,12 +368,12 @@ struct RpcClientInner<L: OrbitRpcLane> {
 /// This type does not create a thread or depend on an async runtime.
 /// The embedding runtime must drive [`Self::poll_replies`] from one
 /// long-running task. Each matched reply wakes the corresponding
-/// [`OrbitRpcCall`] future.
-pub struct OrbitRpcClient<L: OrbitRpcLane> {
+/// [`Call`] future.
+pub struct Client<L: Lane> {
     inner: Arc<RpcClientInner<L>>,
 }
 
-impl<L: OrbitRpcLane> Clone for OrbitRpcClient<L> {
+impl<L: Lane> Clone for Client<L> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -381,8 +381,8 @@ impl<L: OrbitRpcLane> Clone for OrbitRpcClient<L> {
     }
 }
 
-impl<L: OrbitRpcLane> OrbitRpcClient<L> {
-    pub fn new(rpc: OrbitRpc<L>) -> Self {
+impl<L: Lane> Client<L> {
+    pub fn new(rpc: Endpoint<L>) -> Self {
         let reply_cursor = rpc.reply_cursor_at_head();
         Self {
             inner: Arc::new(RpcClientInner {
@@ -399,7 +399,7 @@ impl<L: OrbitRpcLane> OrbitRpcClient<L> {
         target: NodeId,
         method: &str,
         payload: impl AsRef<[u8]>,
-    ) -> Result<OrbitRpcReply> {
+    ) -> Result<Response> {
         Ok(self.start(target, method, payload)?.await)
     }
 
@@ -414,14 +414,14 @@ impl<L: OrbitRpcLane> OrbitRpcClient<L> {
         target: NodeId,
         method: &str,
         payload: impl AsRef<[u8]>,
-    ) -> Result<OrbitRpcCall<L>> {
+    ) -> Result<Call<L>> {
         let pending = Arc::new(PendingReply::new(target));
         let mut calls = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
         let request_id = self.inner.rpc.publish_request(target, method, payload)?;
         calls.insert(request_id, pending.clone());
         drop(calls);
 
-        Ok(OrbitRpcCall {
+        Ok(Call {
             request_id,
             pending,
             client: Arc::downgrade(&self.inner),
@@ -434,7 +434,7 @@ impl<L: OrbitRpcLane> OrbitRpcClient<L> {
     /// Replies for another node or another client instance remain in
     /// the returned poll as unmatched observations, but do not complete
     /// a local future.
-    pub fn poll_replies(&self) -> OrbitRpcReplyPoll {
+    pub fn poll_replies(&self) -> ReplyPoll {
         let mut cursor = self
             .inner
             .reply_cursor
@@ -481,21 +481,21 @@ impl<L: OrbitRpcLane> OrbitRpcClient<L> {
 /// remain runtime policy: wrap the future with the embedding runtime's
 /// timeout primitive.
 #[must_use = "an RPC call does nothing useful unless it is awaited"]
-pub struct OrbitRpcCall<L: OrbitRpcLane> {
+pub struct Call<L: Lane> {
     request_id: NetId64,
     pending: Arc<PendingReply>,
     client: Weak<RpcClientInner<L>>,
     completed: bool,
 }
 
-impl<L: OrbitRpcLane> OrbitRpcCall<L> {
+impl<L: Lane> Call<L> {
     pub fn request_id(&self) -> NetId64 {
         self.request_id
     }
 }
 
-impl<L: OrbitRpcLane> Future for OrbitRpcCall<L> {
-    type Output = OrbitRpcReply;
+impl<L: Lane> Future for Call<L> {
+    type Output = Response;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.pending.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -515,7 +515,7 @@ impl<L: OrbitRpcLane> Future for OrbitRpcCall<L> {
     }
 }
 
-impl<L: OrbitRpcLane> Drop for OrbitRpcCall<L> {
+impl<L: Lane> Drop for Call<L> {
     fn drop(&mut self) {
         if self.completed {
             return;
@@ -541,11 +541,11 @@ struct DecodedRequest {
 
 struct DecodedReply {
     request_id: NetId64,
-    outcome: OrbitRpcOutcome,
+    outcome: Outcome,
     payload: Bytes,
 }
 
-fn encode_request<L: OrbitRpcLane>(target: NodeId, method: &[u8], payload: &[u8]) -> Result<Bytes> {
+fn encode_request<L: Lane>(target: NodeId, method: &[u8], payload: &[u8]) -> Result<Bytes> {
     let total = REQUEST_HEADER_LEN
         .saturating_add(method.len())
         .saturating_add(payload.len());
@@ -594,11 +594,7 @@ fn decode_request(payload: &Bytes) -> Option<DecodedRequest> {
     })
 }
 
-fn encode_reply<L: OrbitRpcLane>(
-    request_id: NetId64,
-    outcome: OrbitRpcOutcome,
-    payload: &[u8],
-) -> Result<Bytes> {
+fn encode_reply<L: Lane>(request_id: NetId64, outcome: Outcome, payload: &[u8]) -> Result<Bytes> {
     let total = REPLY_HEADER_LEN.saturating_add(payload.len());
     if payload.len() > u32::MAX as usize || total > L::REPLY_RING_SPEC.payload_capacity {
         return Err(Error::RpcFrameTooLarge {
@@ -618,11 +614,11 @@ fn encode_reply<L: OrbitRpcLane>(
     Ok(buf.freeze())
 }
 
-fn decode_reply<L: OrbitRpcLane>(payload: &Bytes) -> Option<DecodedReply> {
+fn decode_reply<L: Lane>(payload: &Bytes) -> Option<DecodedReply> {
     if payload.len() < REPLY_HEADER_LEN || payload[0] != PROTOCOL_VERSION {
         return None;
     }
-    let outcome = OrbitRpcOutcome::from_wire(payload[1])?;
+    let outcome = Outcome::from_wire(payload[1])?;
     let request_id = NetId64::from_raw(u64::from_le_bytes(payload[2..10].try_into().ok()?));
     if request_id.kind() != L::REQUEST_RING_KIND {
         return None;

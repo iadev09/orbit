@@ -12,11 +12,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
 use orbit_rs::ring_shm::ShmRing;
-use orbit_rs::{Fleet, NodeId, OrbitRpc, OrbitRpcClient, OrbitRpcLane, OrbitRpcOutcome, RingSpec};
+use orbit_rs::rpc::{Client, Endpoint, Lane, Outcome};
+use orbit_rs::{Fleet, NodeId, RingSpec};
 
 struct TestRpcLane;
 
-impl OrbitRpcLane for TestRpcLane {
+impl Lane for TestRpcLane {
     const REQUEST_RING_KIND: u8 = 223;
     const REQUEST_RING_SPEC: RingSpec = RingSpec::new(16, 256);
     const REPLY_RING_KIND: u8 = 224;
@@ -103,9 +104,9 @@ fn handler_replies_complete_the_matching_send_futures() {
     let name = fresh_name();
     let parent_fleet =
         Arc::new(Fleet::join_shm_as(name, 3, NodeId::new(0)).expect("parent joins RPC fleet"));
-    let parent_rpc = OrbitRpc::<TestRpcLane>::new(parent_fleet);
+    let parent_rpc = Endpoint::<TestRpcLane>::new(parent_fleet);
     parent_rpc.reset_rings().expect("reset RPC rings");
-    let client = OrbitRpcClient::new(parent_rpc);
+    let client = Client::new(parent_rpc);
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Child => {
@@ -113,7 +114,7 @@ fn handler_replies_complete_the_matching_send_futures() {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(11),
             };
-            let rpc = OrbitRpc::<TestRpcLane>::new(child_fleet);
+            let rpc = Endpoint::<TestRpcLane>::new(child_fleet);
             let mut cursor = rpc.request_cursor_from_start();
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut requests = Vec::new();
@@ -140,19 +141,19 @@ fn handler_replies_complete_the_matching_send_futures() {
             // Reply in reverse order to prove correlation is by request id,
             // not by the order in which callers await their futures.
             if rpc
-                .reply(&requests[2], OrbitRpcOutcome::Completed, "reply:third")
+                .reply(&requests[2], Outcome::Completed, "reply:third")
                 .is_err()
             {
                 std::process::exit(14);
             }
             if rpc
-                .reply(&requests[1], OrbitRpcOutcome::Completed, "reply:second")
+                .reply(&requests[1], Outcome::Completed, "reply:second")
                 .is_err()
             {
                 std::process::exit(15);
             }
             if rpc
-                .reply(&requests[0], OrbitRpcOutcome::Completed, "reply:first")
+                .reply(&requests[0], Outcome::Completed, "reply:first")
                 .is_err()
             {
                 std::process::exit(16);
@@ -183,12 +184,8 @@ fn handler_replies_complete_the_matching_send_futures() {
             let rogue_fleet = Arc::new(
                 Fleet::join_shm_as(name, 3, NodeId::new(2)).expect("rogue joins RPC fleet"),
             );
-            OrbitRpc::<TestRpcLane>::new(rogue_fleet)
-                .publish_reply(
-                    first.request_id(),
-                    OrbitRpcOutcome::Completed,
-                    "reply:rogue",
-                )
+            Endpoint::<TestRpcLane>::new(rogue_fleet)
+                .publish_reply(first.request_id(), Outcome::Completed, "reply:rogue")
                 .expect("publish reply from wrong node");
             let sending_client = client.clone();
 
@@ -209,12 +206,12 @@ fn handler_replies_complete_the_matching_send_futures() {
             cleanup(name);
 
             assert_eq!(child_code, 0, "child reported failure");
-            assert_eq!(first_reply.outcome, OrbitRpcOutcome::Completed);
+            assert_eq!(first_reply.outcome, Outcome::Completed);
             assert_eq!(first_reply.payload, "reply:first");
             assert_eq!(first_reply.from, NodeId::new(1));
-            assert_eq!(second_reply.outcome, OrbitRpcOutcome::Completed);
+            assert_eq!(second_reply.outcome, Outcome::Completed);
             assert_eq!(second_reply.payload, "reply:second");
-            assert_eq!(third_reply.outcome, OrbitRpcOutcome::Completed);
+            assert_eq!(third_reply.outcome, Outcome::Completed);
             assert_eq!(third_reply.payload, "reply:third");
             assert_eq!(client.pending_len(), 0);
         }

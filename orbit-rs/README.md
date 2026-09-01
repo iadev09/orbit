@@ -213,15 +213,15 @@ so normal Rust scope becomes the release boundary for successful work.
 
 ## RPC
 
-`OrbitRpcLane` declares one request ring and one reply ring for an RPC
+`rpc::Lane` declares one request ring and one reply ring for an RPC
 domain. Individual request and reply messages are carried as method plus
 payload bytes; they do not implement `OrbitTyped` and do not allocate
 their own SHM segments.
 
-`OrbitRpcClient::send(...).await` completes from the reply correlated by
+`rpc::Client::send(...).await` completes from the reply correlated by
 the request frame's `NetId64` and the addressed node. Orbit does not
 start a hidden thread or choose an async runtime: the embedding runtime
-owns one reply-polling task and drives `OrbitRpcClient::poll_replies`.
+owns one reply-polling task and drives `rpc::Client::poll_replies`.
 Handler registration, codecs, timeouts, retries, and authorization
 remain adapter policy.
 
