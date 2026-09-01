@@ -37,19 +37,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::fleet::Fleet;
 use crate::id::NetId64;
+use crate::{OrbitTyped, RingSpec};
 
-/// Cache frame payload limit for V0. On Unix this matches the SHM
-/// ring's fixed slot payload size; non-Unix keeps the same contract so
-/// tests and callers do not accidentally rely on unbounded in-memory
-/// frames.
-#[cfg(unix)]
-pub const CACHE_PAYLOAD_MAX: usize = crate::ring::shm::PAYLOAD_MAX;
-#[cfg(not(unix))]
-pub const CACHE_PAYLOAD_MAX: usize = 256;
+/// Cache frame payload limit for V0. This is the cache lane's own SHM
+/// payload capacity; non-Unix keeps the same contract so tests and callers
+/// do not accidentally rely on unbounded in-memory frames.
+pub const CACHE_RING_SPEC: RingSpec = RingSpec::new(65_536, 256);
+pub const CACHE_PAYLOAD_MAX: usize = CACHE_RING_SPEC.payload_capacity;
+pub const CACHE_RING_KIND: u8 = 200;
 
 const HEADER_LEN: usize = 1 + 2 + 2 + 8;
 const OP_PUT: u8 = 1;
@@ -63,7 +61,8 @@ struct OrbitCacheRecord;
 impl OrbitTyped for OrbitCacheRecord {
     // Hand-picked V0 kind. Build-time KIND allocation will replace
     // these manual values later.
-    const KIND: u8 = 200;
+    const KIND: u8 = CACHE_RING_KIND;
+    const RING_SPEC: RingSpec = CACHE_RING_SPEC;
 }
 
 /// Fleet-shared binary cache. Cheap to clone.

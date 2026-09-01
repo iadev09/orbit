@@ -19,15 +19,13 @@ use crate::error::{Error, Result};
 use crate::fleet::{Fleet, NodeId};
 use crate::id::NetId64;
 use crate::ring::cursor::RingCursor;
-use crate::OrbitTyped;
+use crate::{OrbitTyped, RingSpec};
 
-/// Event frame payload limit for V0. On Unix this matches the SHM
-/// ring's fixed slot payload size; non-Unix keeps the same contract so
-/// callers do not accidentally rely on unbounded in-memory frames.
-#[cfg(unix)]
-pub const EVENT_PAYLOAD_MAX: usize = crate::ring::shm::PAYLOAD_MAX;
-#[cfg(not(unix))]
-pub const EVENT_PAYLOAD_MAX: usize = 256;
+/// Event frame payload limit for V0. This is the event lane's own SHM
+/// payload capacity; non-Unix keeps the same contract so callers do not
+/// accidentally rely on unbounded in-memory frames.
+pub const EVENT_RING_SPEC: RingSpec = RingSpec::new(1024, 256);
+pub const EVENT_PAYLOAD_MAX: usize = EVENT_RING_SPEC.payload_capacity;
 
 const HEADER_LEN: usize = 2 + 2 + 8;
 const FRAME_KIND_EVENT: u8 = 1;
@@ -41,6 +39,7 @@ impl OrbitTyped for OrbitEventRecord {
     // Hand-picked V0 kind. Build-time KIND allocation will replace
     // these manual values later.
     const KIND: u8 = EVENT_RING_KIND;
+    const RING_SPEC: RingSpec = EVENT_RING_SPEC;
 }
 
 /// Cursor for one event subscriber.
@@ -301,18 +300,17 @@ mod tests {
     #[test]
     fn reports_lag_when_cursor_falls_behind_capacity() {
         let fleet = Arc::new(Fleet::join("event_lag", 1).expect("fleet"));
-        fleet.ring_with_capacity::<super::OrbitEventRecord>(2);
         let bus = OrbitEventBus::new(fleet);
         let mut cursor = bus.cursor_from_start();
 
-        bus.publish("n", b"1").expect("publish 1");
-        bus.publish("n", b"2").expect("publish 2");
-        bus.publish("n", b"3").expect("publish 3");
+        for value in 0..=super::EVENT_RING_SPEC.capacity {
+            bus.publish("n", value.to_string().as_bytes())
+                .expect("publish event");
+        }
 
         let poll = bus.poll(&mut cursor);
         assert_eq!(poll.lagged, 1);
-        assert_eq!(poll.events.len(), 2);
-        assert_eq!(poll.events[0].payload, b"2");
-        assert_eq!(poll.events[1].payload, b"3");
+        assert_eq!(poll.events.len(), super::EVENT_RING_SPEC.capacity);
+        assert_eq!(poll.events[0].payload, b"1");
     }
 }

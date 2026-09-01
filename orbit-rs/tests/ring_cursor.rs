@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use orbit_rs::{
-    Fleet, Frame, NetId64, NodeId, OrbitTyped, Ring, RingCursor, RingFrameSource, poll_ring,
+    Fleet, Frame, NetId64, NodeId, OrbitTyped, Ring, RingCursor, RingFrameSource, RingSpec,
+    poll_ring,
 };
 
 #[derive(Clone, Debug)]
@@ -8,6 +9,7 @@ struct CursorRecord;
 
 impl OrbitTyped for CursorRecord {
     const KIND: u8 = 31;
+    const RING_SPEC: RingSpec = RingSpec::new(4, 16);
 }
 
 #[derive(Clone, Debug)]
@@ -15,11 +17,12 @@ struct SmallWindowRecord;
 
 impl OrbitTyped for SmallWindowRecord {
     const KIND: u8 = 32;
+    const RING_SPEC: RingSpec = RingSpec::new(2, 16);
 }
 
 #[test]
 fn cursor_from_start_reads_available_history() {
-    let ring = Ring::new::<CursorRecord>(4);
+    let ring = Ring::new::<CursorRecord>();
     ring.write(NodeId::ZERO, 0, 0, Bytes::from_static(b"a"));
     ring.write(NodeId::ZERO, 0, 0, Bytes::from_static(b"b"));
 
@@ -52,7 +55,6 @@ fn cursor_at_head_only_reads_future_frames() {
 #[test]
 fn lagged_cursor_reports_overwritten_window() {
     let fleet = Fleet::join("cursor_lag", 1).expect("fleet");
-    fleet.ring_with_capacity::<SmallWindowRecord>(2);
     let mut cursor = fleet.cursor_from_start::<SmallWindowRecord>();
 
     fleet.publish::<SmallWindowRecord>(0, 0, Bytes::from_static(b"one"));

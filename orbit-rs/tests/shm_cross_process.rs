@@ -29,8 +29,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
-use orbit_rs::NodeId;
 use orbit_rs::ring_shm::ShmRing;
+use orbit_rs::{NodeId, RingSpec};
 
 /// macOS limits POSIX SHM names to PSHMNAMLEN (31 chars). The full
 /// constructed segment name is `/orbit-{fleet}-{kind}-{uid}`, so the
@@ -38,10 +38,20 @@ use orbit_rs::ring_shm::ShmRing;
 /// to fit comfortably under the limit on every Unix.
 fn fresh_name(_test_label: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let pid_short = std::process::id() & 0xFFFF;
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("xp{pid_short:04x}{n}")
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .subsec_nanos();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFF;
+    format!("x{pid_short:04x}{nonce:08x}{n:02x}")
+}
+
+fn spec() -> RingSpec {
+    RingSpec::new(16, 64)
 }
 
 /// Wait for child with a generous timeout. Returns the child's
@@ -76,7 +86,7 @@ fn parent_writes_child_reads() {
 
     // Parent creates the segment and writes BEFORE forking so the
     // mapping is already populated when the child opens it.
-    let ring = ShmRing::open_or_create(&name, 7, 16).expect("parent open_or_create");
+    let ring = ShmRing::open_or_create(&name, 7, spec()).expect("parent open_or_create");
     let id = ring
         .write(
             NodeId::new(0),
@@ -95,7 +105,7 @@ fn parent_writes_child_reads() {
         }
         ForkResult::Child => {
             // Child has its own address space; open the SAME named segment.
-            let child_ring = match ShmRing::open_or_create(&name, 7, 16) {
+            let child_ring = match ShmRing::open_or_create(&name, 7, spec()) {
                 Ok(r) => r,
                 Err(_) => std::process::exit(11),
             };
@@ -123,7 +133,8 @@ fn child_writes_parent_reads() {
     let name = fresh_name("child-writes");
 
     // Parent creates the segment empty, forks; child writes; parent reads.
-    let parent_ring = ShmRing::open_or_create(&name, 11, 16).expect("parent create empty segment");
+    let parent_ring =
+        ShmRing::open_or_create(&name, 11, spec()).expect("parent create empty segment");
 
     match unsafe { fork() }.expect("fork failed") {
         ForkResult::Parent { child } => {
@@ -141,7 +152,7 @@ fn child_writes_parent_reads() {
             let _ = parent_ring.unlink();
         }
         ForkResult::Child => {
-            let child_ring = match ShmRing::open_or_create(&name, 11, 16) {
+            let child_ring = match ShmRing::open_or_create(&name, 11, spec()) {
                 Ok(r) => r,
                 Err(_) => std::process::exit(21),
             };
@@ -167,7 +178,7 @@ fn child_writes_parent_reads() {
 fn ping_pong_two_writes_one_each_side() {
     let name = fresh_name("ping-pong");
 
-    let parent_ring = ShmRing::open_or_create(&name, 13, 16).expect("parent create");
+    let parent_ring = ShmRing::open_or_create(&name, 13, spec()).expect("parent create");
     let parent_id = parent_ring
         .write(NodeId::new(0), 0, 1, Bytes::from_static(b"ping"))
         .expect("parent write");
@@ -191,7 +202,7 @@ fn ping_pong_two_writes_one_each_side() {
             let _ = parent_ring.unlink();
         }
         ForkResult::Child => {
-            let child_ring = match ShmRing::open_or_create(&name, 13, 16) {
+            let child_ring = match ShmRing::open_or_create(&name, 13, spec()) {
                 Ok(r) => r,
                 Err(_) => std::process::exit(31),
             };

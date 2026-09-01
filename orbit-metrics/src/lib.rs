@@ -10,8 +10,22 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use bytes::Bytes;
-pub use orbit_rs::OrbitTyped;
 use orbit_rs::{Fleet, NetId64};
+pub use orbit_rs::{OrbitTyped, RingSpec};
+
+/// Default ring capacity for one current snapshot per fleet node.
+///
+/// This is a scan window, not a history-retention promise. At the default
+/// one-second publish cadence it leaves ample room for fleet-sized bursts
+/// while keeping scalar metric rings small.
+pub const METRIC_SNAPSHOT_RING_CAPACITY: usize = 1_024;
+
+/// Default ring capacity for ordinary keyed metric rows.
+///
+/// Keyed collectors may need to scan far enough back to find the latest row
+/// for every active key, so their default is larger than node snapshots.
+/// High-cardinality domains should still choose and document their own bound.
+pub const KEYED_METRIC_RING_CAPACITY: usize = 4_096;
 
 /// A periodic metrics snapshot carried by an Orbit ring.
 ///
@@ -118,13 +132,12 @@ impl<T: OrbitMetricSnapshot> OrbitMetricPublisher<T> {
     /// without decoding.
     pub fn publish(&self, snapshot: &T) -> Result<NetId64, String> {
         let payload = snapshot.encode()?;
-        #[cfg(unix)]
-        if payload.len() > orbit_rs::ring_shm::PAYLOAD_MAX {
+        if payload.len() > T::RING_SPEC.payload_capacity {
             return Err(format!(
                 "orbit metrics payload too large for {}: {} > {}",
                 T::FAMILY,
                 payload.len(),
-                orbit_rs::ring_shm::PAYLOAD_MAX
+                T::RING_SPEC.payload_capacity
             ));
         }
         Ok(self.family.fleet.publish::<T>(
@@ -282,6 +295,7 @@ mod tests {
 
     impl OrbitTyped for TestSnapshot {
         const KIND: u8 = 211;
+        const RING_SPEC: RingSpec = RingSpec::new(METRIC_SNAPSHOT_RING_CAPACITY, 18);
     }
 
     impl OrbitMetricSnapshot for TestSnapshot {
@@ -390,6 +404,7 @@ mod tests {
 
     impl OrbitTyped for KeyedSnapshot {
         const KIND: u8 = 212;
+        const RING_SPEC: RingSpec = RingSpec::new(KEYED_METRIC_RING_CAPACITY, 64);
     }
 
     impl OrbitMetricSnapshot for KeyedSnapshot {

@@ -91,8 +91,9 @@ process.
 ## Example Shape
 
 ```rust
-use orbit_metrics::OrbitTyped;
-use orbit_metrics::OrbitMetricSnapshot;
+use orbit_metrics::{
+    METRIC_SNAPSHOT_RING_CAPACITY, OrbitMetricSnapshot, OrbitTyped, RingSpec,
+};
 
 struct WorkerSnapshot {
     node: u16,
@@ -102,6 +103,7 @@ struct WorkerSnapshot {
 
 impl OrbitTyped for WorkerSnapshot {
     const KIND: u8 = 42;
+    const RING_SPEC: RingSpec = RingSpec::new(METRIC_SNAPSHOT_RING_CAPACITY, 18);
 }
 
 impl OrbitMetricSnapshot for WorkerSnapshot {
@@ -136,6 +138,19 @@ impl OrbitMetricSnapshot for WorkerSnapshot {
     }
 }
 ```
+
+## Capacity Policy
+
+`METRIC_SNAPSHOT_RING_CAPACITY` (`1_024`) is the reusable default for scalar
+families that publish one current snapshot per fleet node.
+`KEYED_METRIC_RING_CAPACITY` (`4_096`) is the default for ordinary row-like
+families whose collectors search for the latest value per logical key.
+
+These capacities bound the collector's scan window and the shared-memory
+allocation; they are not a promise to retain metric history. Every
+`OrbitTyped` implementation still declares an explicit `RingSpec`.
+High-cardinality domains should choose and document a larger domain-specific
+capacity when their key count and publish rate require it.
 
 ## Use Cases
 

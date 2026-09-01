@@ -12,14 +12,20 @@ use std::time::Duration;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
 use orbit_rs::ring_shm::ShmRing;
-use orbit_rs::{EVENT_RING_KIND, Fleet, NodeId, OrbitEventBus};
+use orbit_rs::{EVENT_RING_KIND, EVENT_RING_SPEC, Fleet, NodeId, OrbitEventBus};
 
 fn fresh_name() -> &'static str {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid_short = std::process::id() & 0xFFFF;
-    let s = format!("ev{pid_short:04x}{n}");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .subsec_nanos();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFF;
+    let s = format!("e{pid_short:04x}{nonce:08x}{n:02x}");
     Box::leak(s.into_boxed_str())
 }
 
@@ -45,7 +51,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
 }
 
 fn cleanup_event_ring(name: &str) {
-    if let Ok(ring) = ShmRing::open_or_create(name, EVENT_RING_KIND, 16) {
+    if let Ok(ring) = ShmRing::open_or_create(name, EVENT_RING_KIND, EVENT_RING_SPEC) {
         let _ = ring.unlink();
     }
 }
@@ -54,7 +60,7 @@ fn cleanup_event_ring(name: &str) {
 fn child_publishes_parent_polls_event() {
     let name = fresh_name();
     let parent_fleet =
-        Arc::new(Fleet::join_shm_as(name, 2, 16, NodeId::new(0)).expect("parent join_shm"));
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
     let parent_bus = OrbitEventBus::new(parent_fleet);
     let mut cursor = parent_bus.cursor_at_head();
 
@@ -80,7 +86,7 @@ fn child_publishes_parent_polls_event() {
             assert_eq!(event.payload, b"hello-from-child");
         }
         ForkResult::Child => {
-            let child_fleet = match Fleet::join_shm_as(name, 2, 16, NodeId::new(1)) {
+            let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(11),
             };
@@ -100,7 +106,7 @@ fn child_publishes_parent_polls_event() {
 fn parent_publishes_child_polls_event() {
     let name = fresh_name();
     let parent_fleet =
-        Arc::new(Fleet::join_shm_as(name, 2, 16, NodeId::new(0)).expect("parent join_shm"));
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
     let parent_bus = OrbitEventBus::new(parent_fleet);
     let id = parent_bus
         .publish("test.parent_published", b"hello-from-parent")
@@ -114,7 +120,7 @@ fn parent_publishes_child_polls_event() {
             println!("child accepted OrbitEvent id={id} topic=test.parent_published");
         }
         ForkResult::Child => {
-            let child_fleet = match Fleet::join_shm_as(name, 2, 16, NodeId::new(1)) {
+            let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(21),
             };

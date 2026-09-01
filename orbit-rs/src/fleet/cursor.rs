@@ -1,9 +1,9 @@
 use std::marker::PhantomData;
 
+use crate::OrbitTyped;
 use crate::fleet::Fleet;
 use crate::ring::Frame;
 use crate::ring::cursor::{RingCursor, RingFrameSource, RingPoll, poll_ring};
-use crate::OrbitTyped;
 
 struct FleetRingSource<'a, T: OrbitTyped> {
     fleet: &'a Fleet,

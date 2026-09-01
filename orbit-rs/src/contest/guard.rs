@@ -11,19 +11,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
+use crate::OrbitTyped;
+use crate::RingSpec;
 use crate::contest::fence::FenceToken;
 use crate::error::{Error, Result};
 use crate::fleet::Fleet;
 use crate::id::NetId64;
 use crate::ring::cursor::{RingCursor, RingLoss};
-use crate::OrbitTyped;
 
 /// Contest frame payload limit for V0. On Unix this matches the SHM ring
 /// slot payload size; non-Unix keeps the same bounded contract.
-#[cfg(unix)]
-pub const CONTEST_PAYLOAD_MAX: usize = crate::ring::shm::PAYLOAD_MAX;
-#[cfg(not(unix))]
-pub const CONTEST_PAYLOAD_MAX: usize = 256;
+pub const CONTEST_RING_SPEC: RingSpec = RingSpec::new(1024, 256);
+pub const CONTEST_PAYLOAD_MAX: usize = CONTEST_RING_SPEC.payload_capacity;
 
 pub const CONTEST_RING_KIND: u8 = 222;
 pub const CONTEST_FRAME_KIND_CLAIM: u8 = 1;
@@ -51,6 +50,7 @@ impl OrbitTyped for ContestRecord {
     // Hand-picked V0 kind. Build-time KIND allocation will replace
     // these manual values later.
     const KIND: u8 = CONTEST_RING_KIND;
+    const RING_SPEC: RingSpec = CONTEST_RING_SPEC;
 }
 
 /// Type namespace for a contest subject.
@@ -871,7 +871,9 @@ mod tests {
         };
 
         // Renew before the original 1_010 expiry, extending to 1_015.
-        guard.renew_at(Duration::from_millis(10), 1_005).expect("renew");
+        guard
+            .renew_at(Duration::from_millis(10), 1_005)
+            .expect("renew");
         assert_eq!(guard.expires_at_ms(), 1_015);
 
         // A contender at 1_012: the original TTL (1_010) has elapsed, but the
@@ -904,7 +906,12 @@ mod tests {
         let fence = Fence::new();
 
         let Claim::Claimed(g1) = claims
-            .try_claim_at::<OriginProbe>("origin:tcp_1", "worker:1", Duration::from_millis(5), 1_000)
+            .try_claim_at::<OriginProbe>(
+                "origin:tcp_1",
+                "worker:1",
+                Duration::from_millis(5),
+                1_000,
+            )
             .expect("claim")
         else {
             panic!("expected initial claim");

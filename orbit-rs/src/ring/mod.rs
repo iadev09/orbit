@@ -54,12 +54,45 @@ use std::sync::{Arc, RwLock};
 use bytes::Bytes;
 
 use crate::NodeId;
-use crate::id::NetId64;
 use crate::OrbitTyped;
+use crate::id::NetId64;
 
 pub mod cursor;
 #[cfg(unix)]
 pub mod shm;
+
+/// Physical policy for one [`OrbitTyped`] ring lane.
+///
+/// The policy is part of the lane's wire contract: every process that
+/// uses the same `OrbitTyped::KIND` must declare the same values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RingSpec {
+    /// Number of slots retained by the circular ring.
+    pub capacity: usize,
+    /// Maximum payload bytes stored inline in each slot.
+    pub payload_capacity: usize,
+}
+
+impl RingSpec {
+    pub const fn new(capacity: usize, payload_capacity: usize) -> Self {
+        Self {
+            capacity,
+            payload_capacity,
+        }
+    }
+
+    pub(crate) fn assert_valid(self) {
+        assert!(self.capacity > 0, "ring capacity must be > 0");
+        assert!(
+            self.capacity.is_power_of_two(),
+            "ring capacity must be a power of two"
+        );
+        assert!(
+            self.payload_capacity <= u32::MAX as usize,
+            "ring payload capacity must fit in u32"
+        );
+    }
+}
 
 /// One record in a ring — the on-wire shape (mirrors `nwd1::Frame`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +112,8 @@ pub struct Ring {
     kind: u8,
     /// Number of slots; constant for the ring's lifetime.
     capacity: usize,
+    /// Maximum inline payload bytes for this ring lane.
+    payload_capacity: usize,
     /// Monotonic write counter. Always increases; slot index is
     /// `(write_pos - 1) % capacity` after a `fetch_add`.
     write_pos: AtomicU64,
@@ -89,9 +124,11 @@ pub struct Ring {
 }
 
 impl Ring {
-    /// Create a ring for type `T` with `capacity` slots.
-    pub fn new<T: OrbitTyped>(capacity: usize) -> Self {
-        assert!(capacity > 0, "Ring capacity must be > 0");
+    /// Create the process-local ring declared by `T::RING_SPEC`.
+    pub fn new<T: OrbitTyped>() -> Self {
+        let spec = T::RING_SPEC;
+        spec.assert_valid();
+        let capacity = spec.capacity;
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             slots.push(RwLock::new(None));
@@ -99,6 +136,7 @@ impl Ring {
         Self {
             kind: T::KIND,
             capacity,
+            payload_capacity: spec.payload_capacity,
             write_pos: AtomicU64::new(0),
             slots,
         }
@@ -112,6 +150,15 @@ impl Ring {
     /// Total slot count — fixed at construction.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Maximum inline payload bytes for this ring lane.
+    pub fn payload_capacity(&self) -> usize {
+        self.payload_capacity
+    }
+
+    pub fn spec(&self) -> RingSpec {
+        RingSpec::new(self.capacity, self.payload_capacity)
     }
 
     /// Monotonic head — number of writes ever performed. Slot index
@@ -129,6 +176,12 @@ impl Ring {
     /// `ver` is the version / tick at write time (V0: caller's
     /// choice).
     pub fn write(&self, node_id: NodeId, frame_kind: u8, ver: u64, payload: Bytes) -> NetId64 {
+        assert!(
+            payload.len() <= self.payload_capacity,
+            "payload {} > ring payload capacity {}",
+            payload.len(),
+            self.payload_capacity
+        );
         let counter = self.write_pos.fetch_add(1, Ordering::AcqRel);
         let id = NetId64::make(self.kind, node_id.get(), counter);
         let slot_idx = (counter as usize) % self.capacity;
@@ -245,6 +298,7 @@ impl std::fmt::Debug for Ring {
         f.debug_struct("Ring")
             .field("kind", &self.kind)
             .field("capacity", &self.capacity)
+            .field("payload_capacity", &self.payload_capacity)
             .field("head", &self.head())
             .finish()
     }
@@ -263,13 +317,20 @@ impl RingRegistry {
         }
     }
 
-    /// Get-or-create the ring for `T`. The first caller for a given
-    /// KIND determines the ring's capacity.
-    pub fn get_or_create<T: OrbitTyped>(&self, capacity: usize) -> Arc<Ring> {
-        self.rings
+    /// Get-or-create the ring declared by `T`.
+    pub fn get_or_create<T: OrbitTyped>(&self) -> Arc<Ring> {
+        let ring = self
+            .rings
             .entry(T::KIND)
-            .or_insert_with(|| Arc::new(Ring::new::<T>(capacity)))
-            .clone()
+            .or_insert_with(|| Arc::new(Ring::new::<T>()))
+            .clone();
+        assert_eq!(
+            ring.spec(),
+            T::RING_SPEC,
+            "OrbitTyped KIND {} was reused with a different ring spec",
+            T::KIND
+        );
+        ring
     }
 
     /// Look up a ring by KIND byte (e.g. when only the id is known).

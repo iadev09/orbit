@@ -29,9 +29,9 @@ use std::sync::Arc;
 use bytemuck::Pod;
 use bytes::Bytes;
 
+use crate::OrbitTyped;
 use crate::fleet::Fleet;
 use crate::id::NetId64;
-use crate::OrbitTyped;
 
 /// Typed handle into the fleet's ring for type `T`.
 ///

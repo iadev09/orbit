@@ -17,6 +17,7 @@
 
 pub mod cache;
 pub mod contest;
+pub mod epoch;
 pub mod error;
 pub mod event;
 pub mod fleet;
@@ -24,7 +25,6 @@ pub mod orbital;
 pub mod ring;
 #[cfg(unix)]
 pub mod shm;
-pub mod tick;
 
 pub mod id {
     //! Re-export of the standalone `netid64` primitive.
@@ -39,26 +39,27 @@ pub mod ring_shm {
 }
 
 #[cfg(unix)]
-pub use cache::{CACHE_PAYLOAD_MAX, OrbitCache, OrbitCacheEntry, OrbitCacheRead};
+pub use cache::{
+    CACHE_PAYLOAD_MAX, CACHE_RING_KIND, CACHE_RING_SPEC, OrbitCache, OrbitCacheEntry,
+    OrbitCacheRead,
+};
 pub use contest::fence::{Fence, FenceToken};
 pub use contest::guard::{
     CONTEST_FRAME_KIND_CLAIM, CONTEST_FRAME_KIND_RELEASE, CONTEST_FRAME_KIND_RENEW,
-    CONTEST_PAYLOAD_MAX, CONTEST_RING_KIND, Claim, Contest, ContestOwner, ContestRecord,
-    ContestSubject, ContestType, Guard, Holder,
+    CONTEST_PAYLOAD_MAX, CONTEST_RING_KIND, CONTEST_RING_SPEC, Claim, Contest, ContestOwner,
+    ContestRecord, ContestSubject, ContestType, Guard, Holder,
 };
+pub use epoch::OrbitEpoch;
 pub use error::{Error, Result};
 pub use event::{
-    EVENT_PAYLOAD_MAX, EVENT_RING_KIND, OrbitEvent, OrbitEventBus, OrbitEventCursor, OrbitEventPoll,
+    EVENT_PAYLOAD_MAX, EVENT_RING_KIND, EVENT_RING_SPEC, OrbitEvent, OrbitEventBus,
+    OrbitEventCursor, OrbitEventPoll,
 };
-pub use fleet::{
-    DEFAULT_RING_CAPACITY, FLEET_HEARTBEAT_RING_KIND, Fleet, FleetHeartbeat, FleetHeartbeatRecord,
-    FleetHeartbeatSnapshot, NodeId,
-};
+pub use fleet::{Fleet, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
 pub use orbital::Orbital;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, poll_ring};
-pub use ring::{Frame, Ring};
-pub use tick::OrbitEpoch;
+pub use ring::{Frame, Ring, RingSpec};
 
 /// Marker for a type that has a stable wire identity across the fleet.
 ///
@@ -68,4 +69,10 @@ pub use tick::OrbitEpoch;
 pub trait OrbitTyped: Clone + Send + Sync + 'static {
     /// Stable wire identifier. Hand-picked in V0; build.rs-generated later.
     const KIND: u8;
+
+    /// Ring layout and retention policy for this wire kind.
+    ///
+    /// This is part of the cross-process wire contract. Reusing a KIND
+    /// with a different spec is an error.
+    const RING_SPEC: RingSpec;
 }

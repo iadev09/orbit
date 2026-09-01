@@ -4,8 +4,8 @@
 for recent facts shared by sibling processes.
 
 It provides type-keyed bounded rings, optional POSIX shared-memory
-backing, fleet membership, heartbeat records, and small reusable
-substrates for cache, events, and contest/claim coordination.
+backing, fleet membership, and small reusable substrates for cache,
+events, and contest/claim coordination.
 
 `orbit-rs` is framework-agnostic. Application lifecycle and runtime
 policy belong above this crate.
@@ -29,7 +29,7 @@ netid64::NetId64
   runtime-bound id carried by every frame
 
 Substrates
-  cache, event bus, contest, heartbeat, typed POD values
+  cache, event bus, contest, typed POD values
 ```
 
 Frame identifiers come from the external
@@ -50,7 +50,8 @@ Fleet::join_shm(...)
 ```
 
 A fleet has a name, a `NodeId`, an expected fleet size, and one ring
-registry. Every `OrbitTyped::KIND` maps to its own ring. Role hierarchy
+registry. Every `OrbitTyped::KIND` maps to its own ring and declares its
+own `RingSpec { capacity, payload_capacity }`. Role hierarchy
 is outside the crate: master, worker, standalone process, or sibling
 tool can all join the same fleet if the embedder gives them compatible
 configuration.
@@ -95,7 +96,7 @@ slot has already been overwritten, the frame is missing by design.
 `KIND`, and that `KIND` selects the ring family used for its frames.
 
 ```rust
-use orbit_rs::OrbitTyped;
+use orbit_rs::{OrbitTyped, RingSpec};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -106,11 +107,13 @@ struct WorkerLoad {
 
 impl OrbitTyped for WorkerLoad {
     const KIND: u8 = 12;
+    const RING_SPEC: RingSpec = RingSpec::new(1024, 8);
 }
 ```
 
 Callers do not pass ring names through the API. They pass their own type.
-Every worker built from the same program knows the same `KIND`, so
+Every worker built from the same program must know the same `KIND` and
+`RING_SPEC`, so
 `Fleet::publish::<WorkerLoad>` and `Fleet::read_head::<WorkerLoad>` meet
 on the same ring.
 
@@ -207,14 +210,6 @@ while others can observe who carries it and back off.
 
 TTL handles abandoned claims. Releasing is tied to the `Guard` lifetime,
 so normal Rust scope becomes the release boundary for successful work.
-
-## Heartbeat
-
-`FleetHeartbeat` is an Orbit substrate signal. It shows that a node is
-still publishing into the shared fleet fabric.
-
-It is not process supervision. Kill/restart/readiness policy belongs to
-the embedding runtime.
 
 ## Dependency Boundary
 

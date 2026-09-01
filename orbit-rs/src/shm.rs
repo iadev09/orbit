@@ -42,9 +42,11 @@ pub struct ShmRegion {
 impl ShmRegion {
     /// Open or create a shared-memory segment of `size` bytes,
     /// memory-mapped read/write. Idempotent: if the segment already
-    /// exists with the same name, it is reused (`created = false`).
-    /// First creation does `ftruncate(size)`; later opens leave the
-    /// existing size intact.
+    /// exists with the same name and enough mapped bytes, it is reused
+    /// (`created = false`). First creation does `ftruncate(size)`;
+    /// later opens verify the existing object before mapping it. Some
+    /// platforms report a page-rounded SHM size, so a larger `st_size`
+    /// is valid; the owning data structure must verify its own header.
     pub fn open_or_create(name: &str, size: usize) -> io::Result<Self> {
         let cname = CString::new(name)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "shm name has nul byte"))?;
@@ -83,6 +85,34 @@ impl ShmRegion {
                 let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
                 return Err(err);
             }
+        }
+
+        // Never mmap beyond the real SHM object: access past it can raise
+        // SIGBUS. A larger reported size is valid on platforms (notably
+        // macOS) that page-round POSIX SHM objects; callers verify their
+        // own ABI metadata after mapping.
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let stat_rc = unsafe { libc::fstat(fd, stat.as_mut_ptr()) };
+        if stat_rc != 0 {
+            let err = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            if created {
+                let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
+            }
+            return Err(err);
+        }
+        let actual_size = unsafe { stat.assume_init() }.st_size;
+        if actual_size < 0 || (actual_size as usize) < size {
+            unsafe { libc::close(fd) };
+            if created {
+                let _ = unsafe { libc::shm_unlink(cname.as_ptr()) };
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "SHM segment {name} size {actual_size} is smaller than requested mapping {size}"
+                ),
+            ));
         }
 
         // Memory-map the segment.

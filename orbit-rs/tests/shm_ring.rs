@@ -9,8 +9,8 @@
 #![cfg(unix)]
 
 use bytes::Bytes;
-use orbit_rs::NodeId;
-use orbit_rs::ring_shm::ShmRing;
+use orbit_rs::ring_shm::{ShmRing, segment_size_for_spec};
+use orbit_rs::{NodeId, RingSpec};
 
 /// macOS limits POSIX SHM names to PSHMNAMLEN (31 chars). Keep
 /// fleet names short — the full segment name is
@@ -18,18 +18,28 @@ use orbit_rs::ring_shm::ShmRing;
 /// 3-digit kind we only have ~14 chars budget for the fleet name.
 fn fresh_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let pid_short = std::process::id() & 0xFFFF;
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("ts{pid_short:04x}{n}")
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .subsec_nanos();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFF;
+    format!("t{pid_short:04x}{nonce:08x}{n:02x}")
+}
+
+fn spec(capacity: usize) -> RingSpec {
+    RingSpec::new(capacity, 16)
 }
 
 #[test]
 fn open_or_create_creates_first_then_attaches() {
     let name = fresh_name();
-    let r1 = ShmRing::open_or_create(&name, 7, 16).unwrap();
+    let r1 = ShmRing::open_or_create(&name, 7, spec(16)).unwrap();
     assert!(r1.created(), "first opener creates");
-    let r2 = ShmRing::open_or_create(&name, 7, 16).unwrap();
+    let r2 = ShmRing::open_or_create(&name, 7, spec(16)).unwrap();
     assert!(!r2.created(), "second opener attaches");
     let _ = r1.unlink();
 }
@@ -37,7 +47,7 @@ fn open_or_create_creates_first_then_attaches() {
 #[test]
 fn write_then_read_returns_same_frame() {
     let name = fresh_name();
-    let ring = ShmRing::open_or_create(&name, 7, 16).unwrap();
+    let ring = ShmRing::open_or_create(&name, 7, spec(16)).unwrap();
     let id = ring
         .write(NodeId::new(3), 0, 42, Bytes::from_static(b"hello"))
         .unwrap();
@@ -57,7 +67,7 @@ fn write_then_read_returns_same_frame() {
 #[test]
 fn head_advances_with_writes() {
     let name = fresh_name();
-    let ring = ShmRing::open_or_create(&name, 5, 16).unwrap();
+    let ring = ShmRing::open_or_create(&name, 5, spec(16)).unwrap();
     assert_eq!(ring.head(), 0);
     ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"a"))
         .unwrap();
@@ -70,7 +80,7 @@ fn head_advances_with_writes() {
 #[test]
 fn read_head_returns_latest() {
     let name = fresh_name();
-    let ring = ShmRing::open_or_create(&name, 5, 16).unwrap();
+    let ring = ShmRing::open_or_create(&name, 5, spec(16)).unwrap();
     assert!(ring.read_head().is_none());
 
     ring.write(NodeId::new(0), 0, 0, Bytes::from_static(b"first"))
@@ -88,7 +98,7 @@ fn read_head_returns_latest() {
 #[test]
 fn wraparound_overwrites_old_slots() {
     let name = fresh_name();
-    let ring = ShmRing::open_or_create(&name, 5, 4).unwrap();
+    let ring = ShmRing::open_or_create(&name, 5, spec(4)).unwrap();
     let mut ids = Vec::new();
     for i in 0..6 {
         let id = ring
@@ -108,8 +118,8 @@ fn wraparound_overwrites_old_slots() {
 #[test]
 fn two_handles_same_segment_share_state() {
     let name = fresh_name();
-    let writer = ShmRing::open_or_create(&name, 9, 16).unwrap();
-    let reader = ShmRing::open_or_create(&name, 9, 16).unwrap();
+    let writer = ShmRing::open_or_create(&name, 9, spec(16)).unwrap();
+    let reader = ShmRing::open_or_create(&name, 9, spec(16)).unwrap();
     assert!(writer.created());
     assert!(!reader.created());
 
@@ -126,8 +136,48 @@ fn two_handles_same_segment_share_state() {
 #[test]
 fn payload_too_large_returns_error() {
     let name = fresh_name();
-    let ring = ShmRing::open_or_create(&name, 3, 16).unwrap();
-    let huge = Bytes::from(vec![0u8; orbit_rs::ring_shm::PAYLOAD_MAX + 1]);
+    let ring_spec = RingSpec::new(16, 8);
+    let ring = ShmRing::open_or_create(&name, 3, ring_spec).unwrap();
+    let huge = Bytes::from(vec![0u8; ring_spec.payload_capacity + 1]);
     assert!(ring.write(NodeId::new(0), 0, 0, huge).is_err());
+    let _ = ring.unlink();
+}
+
+#[test]
+fn segment_size_uses_the_ring_payload_capacity() {
+    let small = segment_size_for_spec(RingSpec::new(4, 16)).unwrap();
+    let large = segment_size_for_spec(RingSpec::new(4, 256)).unwrap();
+
+    assert_eq!(small, 64 + 4 * 64);
+    assert_eq!(large, 64 + 4 * 320);
+}
+
+#[test]
+fn same_kind_rejects_a_different_ring_spec() {
+    let name = fresh_name();
+    let original_spec = RingSpec::new(16, 32);
+    let ring = ShmRing::open_or_create(&name, 14, original_spec).unwrap();
+
+    let err = match ShmRing::open_or_create(&name, 14, RingSpec::new(16, 256)) {
+        Ok(_) => panic!("same SHM path must reject a different slot layout"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    let _ = ring.unlink();
+}
+
+#[test]
+fn zero_payload_ring_accepts_only_empty_frames() {
+    let name = fresh_name();
+    let ring = ShmRing::open_or_create(&name, 15, RingSpec::new(16, 0)).unwrap();
+
+    ring.write(NodeId::ZERO, 1, 0, Bytes::new())
+        .expect("empty heartbeat-like frame");
+    assert!(
+        ring.write(NodeId::ZERO, 1, 0, Bytes::from_static(b"x"))
+            .is_err()
+    );
+
     let _ = ring.unlink();
 }

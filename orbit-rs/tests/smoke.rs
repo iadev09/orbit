@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use bytes::Bytes;
-use orbit_rs::{Fleet, NetId64, OrbitTyped, Orbital};
+use orbit_rs::{Fleet, NetId64, OrbitTyped, Orbital, RingSpec};
 
 #[test]
 fn empty_fleet_rejected() {
@@ -31,12 +31,14 @@ fn join_single_member_succeeds() {
 struct CurrencyRate;
 impl OrbitTyped for CurrencyRate {
     const KIND: u8 = 7;
+    const RING_SPEC: RingSpec = RingSpec::new(4, 256);
 }
 
 #[derive(Clone, Debug)]
 struct UserSession;
 impl OrbitTyped for UserSession {
     const KIND: u8 = 9;
+    const RING_SPEC: RingSpec = RingSpec::new(4, 256);
 }
 
 #[test]
@@ -136,8 +138,6 @@ fn read_unknown_kind_returns_none() {
 #[test]
 fn ring_wraparound_overwrites_old_frames() {
     let fleet = Fleet::join("test", 1).unwrap();
-    let _ring = fleet.ring_with_capacity::<CurrencyRate>(4);
-
     let mut ids = Vec::new();
     for i in 0..6 {
         ids.push(fleet.publish::<CurrencyRate>(0, i as u64, Bytes::from(vec![i as u8])));
@@ -203,6 +203,7 @@ struct SimpleCounter(pub u32);
 
 impl OrbitTyped for SimpleCounter {
     const KIND: u8 = 11;
+    const RING_SPEC: RingSpec = RingSpec::new(1024, std::mem::size_of::<SimpleCounter>());
 }
 
 #[test]
@@ -255,6 +256,7 @@ fn orbital_distinct_types_independent() {
     struct OtherValue(pub u32);
     impl OrbitTyped for OtherValue {
         const KIND: u8 = 12;
+        const RING_SPEC: RingSpec = RingSpec::new(1024, std::mem::size_of::<OtherValue>());
     }
 
     let fleet = Arc::new(Fleet::join("test", 1).unwrap());

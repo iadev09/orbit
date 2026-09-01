@@ -13,13 +13,14 @@ use std::time::Duration;
 use bytemuck::{Pod, Zeroable};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
-use orbit_rs::{Fleet, OrbitTyped, Orbital};
+use orbit_rs::{Fleet, OrbitTyped, Orbital, RingSpec};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 struct CrossCounter(pub u64);
 impl OrbitTyped for CrossCounter {
     const KIND: u8 = 41;
+    const RING_SPEC: RingSpec = RingSpec::new(16, std::mem::size_of::<CrossCounter>());
 }
 
 fn fresh_name() -> &'static str {
@@ -27,10 +28,16 @@ fn fresh_name() -> &'static str {
     // Each test_fn picks a different one to avoid segment collisions
     // between parallel tests. We leak a String to get 'static.
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid_short = std::process::id() & 0xFFFF;
-    let s = format!("xf{pid_short:04x}{n}");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .subsec_nanos();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFF;
+    let s = format!("f{pid_short:04x}{nonce:08x}{n:02x}");
     Box::leak(s.into_boxed_str())
 }
 
@@ -59,7 +66,7 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
 fn parent_publishes_via_orbital_child_loads() {
     let name = fresh_name();
 
-    let fleet = Arc::new(Fleet::join_shm(name, 4, 16).expect("parent join_shm"));
+    let fleet = Arc::new(Fleet::join_shm(name, 4).expect("parent join_shm"));
     assert!(fleet.is_shm());
 
     let counter = Orbital::<CrossCounter>::new(fleet.clone());
@@ -76,7 +83,7 @@ fn parent_publishes_via_orbital_child_loads() {
         }
         ForkResult::Child => {
             // Child process: open the same SHM-backed fleet.
-            let child_fleet = match Fleet::join_shm(name, 4, 16) {
+            let child_fleet = match Fleet::join_shm(name, 4) {
                 Ok(f) => Arc::new(f),
                 Err(_) => std::process::exit(41),
             };
@@ -98,7 +105,7 @@ fn child_publishes_parent_loads() {
     let name = fresh_name();
 
     // Parent creates the fleet (and thus the SHM segment) before fork.
-    let fleet = Arc::new(Fleet::join_shm(name, 4, 16).expect("parent join_shm"));
+    let fleet = Arc::new(Fleet::join_shm(name, 4).expect("parent join_shm"));
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Parent { child } => {
@@ -117,7 +124,7 @@ fn child_publishes_parent_loads() {
             );
         }
         ForkResult::Child => {
-            let child_fleet = match Fleet::join_shm(name, 4, 16) {
+            let child_fleet = match Fleet::join_shm(name, 4) {
                 Ok(f) => Arc::new(f),
                 Err(_) => std::process::exit(51),
             };

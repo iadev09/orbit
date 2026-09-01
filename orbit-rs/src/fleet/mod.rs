@@ -3,25 +3,18 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
 
+use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::id::NetId64;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
 use crate::ring::{Frame, Ring, RingRegistry};
-use crate::tick::OrbitEpoch;
-use crate::OrbitTyped;
 
 mod cursor;
-pub mod heartbeat;
-pub use heartbeat::{
-    FLEET_HEARTBEAT_FRAME_KIND, FLEET_HEARTBEAT_RING_KIND, FleetHeartbeat, FleetHeartbeatRecord,
-    FleetHeartbeatSnapshot,
-};
 
 /// A node's slot inside the fleet — assigned at `join` time.
 ///
@@ -87,11 +80,6 @@ enum RingBacking {
     Shm(ShmRingRegistry),
 }
 
-/// Default ring capacity when [`Fleet::publish`] is called for a
-/// kind that has no ring yet. Override with [`Fleet::ring_with_capacity`]
-/// if a specific kind needs more (or fewer) slots.
-pub const DEFAULT_RING_CAPACITY: usize = 1024;
-
 impl Fleet {
     /// Join (or create) a fleet under `name` with `fleet_size` total
     /// expected members. In V0 every call returns a fresh local
@@ -118,29 +106,23 @@ impl Fleet {
 
     /// Join (or create) a fleet whose ring storage is backed by
     /// POSIX shared memory. Multiple processes calling this with
-    /// the same `name` and `capacity` share the same kernel-level
+    /// the same `name` share the same kernel-level
     /// segments — the fleet sees each other's writes.
     ///
-    /// `capacity` must be a power of two (cheap modulo); applies
-    /// per-KIND ring (each `OrbitTyped` kind gets its own SHM
-    /// segment of `capacity` slots).
+    /// Each `OrbitTyped` kind gets its own SHM segment whose layout is
+    /// declared by `OrbitTyped::RING_SPEC`.
     ///
     /// Cross-process naming: segments are `/orbit-{name}-{kind}-{uid}`.
     /// macOS limits POSIX SHM names to 31 chars (PSHMNAMLEN); a
     /// short fleet name is required there.
     #[cfg(unix)]
-    pub fn join_shm(name: &'static str, fleet_size: u8, capacity: usize) -> Result<Self> {
-        Self::join_shm_as(name, fleet_size, capacity, NodeId::ZERO)
+    pub fn join_shm(name: &'static str, fleet_size: u8) -> Result<Self> {
+        Self::join_shm_as(name, fleet_size, NodeId::ZERO)
     }
 
     /// Join (or create) a SHM-backed fleet with an explicit node id.
     #[cfg(unix)]
-    pub fn join_shm_as(
-        name: &'static str,
-        fleet_size: u8,
-        capacity: usize,
-        node_id: NodeId,
-    ) -> Result<Self> {
+    pub fn join_shm_as(name: &'static str, fleet_size: u8, node_id: NodeId) -> Result<Self> {
         if fleet_size == 0 {
             return Err(Error::EmptyFleet);
         }
@@ -150,7 +132,7 @@ impl Fleet {
                 fleet_size,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::Shm(ShmRingRegistry::new(name, capacity)),
+                backing: RingBacking::Shm(ShmRingRegistry::new(name)),
             }),
         })
     }
@@ -207,24 +189,10 @@ impl Fleet {
     /// Panics if called on a SHM-backed fleet.
     pub fn ring<T: OrbitTyped>(&self) -> Arc<Ring> {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>(DEFAULT_RING_CAPACITY),
+            RingBacking::InMemory(r) => r.get_or_create::<T>(),
             #[cfg(unix)]
             RingBacking::Shm(_) => {
                 panic!("Fleet::ring called on SHM-backed fleet — use Fleet::shm_ring instead");
-            }
-        }
-    }
-
-    /// Get-or-create the in-memory ring for type `T` with an
-    /// explicit capacity. See [`Fleet::ring`].
-    pub fn ring_with_capacity<T: OrbitTyped>(&self, capacity: usize) -> Arc<Ring> {
-        match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>(capacity),
-            #[cfg(unix)]
-            RingBacking::Shm(_) => {
-                panic!(
-                    "Fleet::ring_with_capacity called on SHM-backed fleet — capacity is fixed at join_shm time"
-                );
             }
         }
     }
@@ -243,7 +211,7 @@ impl Fleet {
     #[cfg(unix)]
     pub fn shm_ring<T: OrbitTyped>(&self) -> std::io::Result<Arc<ShmRing>> {
         match &self.inner.backing {
-            RingBacking::Shm(r) => r.get_or_create_for(T::KIND),
+            RingBacking::Shm(r) => r.get_or_create_for::<T>(),
             RingBacking::InMemory(_) => {
                 panic!("Fleet::shm_ring called on in-memory fleet — use Fleet::ring instead");
             }
@@ -257,19 +225,19 @@ impl Fleet {
     ///
     /// # Panics
     ///
-    /// On a SHM-backed fleet, panics if the SHM open fails or the
-    /// payload exceeds [`ring_shm::PAYLOAD_MAX`]. V1 contract: SHM
-    /// errors are operator-visible failures, not silent ones.
+    /// Panics if the ring cannot be opened or the payload exceeds
+    /// `T::RING_SPEC.payload_capacity`. Ring failures are
+    /// operator-visible, not silently ignored.
     pub fn publish<T: OrbitTyped>(&self, frame_kind: u8, ver: u64, payload: Bytes) -> NetId64 {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                let ring = r.get_or_create::<T>(DEFAULT_RING_CAPACITY);
+                let ring = r.get_or_create::<T>();
                 ring.write(self.node_id(), frame_kind, ver, payload)
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
                 let ring = r
-                    .get_or_create_for(T::KIND)
+                    .get_or_create_for::<T>()
                     .expect("SHM ring open failed — fleet unusable");
                 ring.write(self.node_id(), frame_kind, ver, payload)
                     .expect("SHM ring write failed")
@@ -293,12 +261,12 @@ impl Fleet {
     pub fn read_head<T: OrbitTyped>(&self) -> Option<Frame> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                let ring = r.get_or_create::<T>(DEFAULT_RING_CAPACITY);
+                let ring = r.get_or_create::<T>();
                 ring.read_head()
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                let ring = r.get_or_create_for(T::KIND).ok()?;
+                let ring = r.get_or_create_for::<T>().ok()?;
                 ring.read_head()
             }
         }
@@ -311,10 +279,10 @@ impl Fleet {
     /// when the ring is fresh / no writes have happened.
     pub fn head<T: OrbitTyped>(&self) -> u64 {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>(DEFAULT_RING_CAPACITY).head(),
+            RingBacking::InMemory(r) => r.get_or_create::<T>().head(),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for(T::KIND)
+                .get_or_create_for::<T>()
                 .map(|ring| ring.head())
                 .unwrap_or(0),
         }
@@ -329,25 +297,23 @@ impl Fleet {
     /// prefer [`Fleet::read`].
     pub fn read_at<T: OrbitTyped>(&self, counter: u64) -> Option<Frame> {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => {
-                r.get_or_create::<T>(DEFAULT_RING_CAPACITY).read_at(counter)
-            }
+            RingBacking::InMemory(r) => r.get_or_create::<T>().read_at(counter),
             #[cfg(unix)]
-            RingBacking::Shm(r) => r.get_or_create_for(T::KIND).ok()?.read_at(counter),
+            RingBacking::Shm(r) => r.get_or_create_for::<T>().ok()?.read_at(counter),
         }
     }
 
     /// Capacity of the ring for type `T`. Lazily attaches the ring
-    /// on first access. Falls back to [`DEFAULT_RING_CAPACITY`] when
+    /// on first access. Falls back to `T::RING_SPEC.capacity` when
     /// SHM attach fails.
     pub fn ring_capacity<T: OrbitTyped>(&self) -> usize {
         match &self.inner.backing {
-            RingBacking::InMemory(r) => r.get_or_create::<T>(DEFAULT_RING_CAPACITY).capacity(),
+            RingBacking::InMemory(r) => r.get_or_create::<T>().capacity(),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
-                .get_or_create_for(T::KIND)
+                .get_or_create_for::<T>()
                 .map(|ring| ring.capacity())
-                .unwrap_or(DEFAULT_RING_CAPACITY),
+                .unwrap_or(T::RING_SPEC.capacity),
         }
     }
 
@@ -361,54 +327,15 @@ impl Fleet {
     pub fn reset_ring<T: OrbitTyped>(&self) -> std::io::Result<()> {
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
-                r.get_or_create::<T>(DEFAULT_RING_CAPACITY).reset();
+                r.get_or_create::<T>().reset();
                 Ok(())
             }
             #[cfg(unix)]
             RingBacking::Shm(r) => {
-                r.get_or_create_for(T::KIND)?.reset();
+                r.get_or_create_for::<T>()?.reset();
                 Ok(())
             }
         }
-    }
-
-    /// Publish a fleet-level Orbit heartbeat for this node.
-    ///
-    /// This is substrate liveness, not process supervision. Embedders
-    /// may inspect it to see whether a node is still writing into the
-    /// Orbit fabric, but worker kill/restart policy belongs above this
-    /// crate.
-    pub fn publish_heartbeat(&self) -> FleetHeartbeat {
-        self.publish_heartbeat_at(OrbitEpoch::now())
-    }
-
-    pub fn publish_heartbeat_at(&self, captured_at: OrbitEpoch) -> FleetHeartbeat {
-        let id = self.publish::<FleetHeartbeatRecord>(
-            FLEET_HEARTBEAT_FRAME_KIND,
-            captured_at.as_unix_ms(),
-            Bytes::new(),
-        );
-        FleetHeartbeat {
-            id,
-            node_id: self.node_id(),
-            captured_at,
-        }
-    }
-
-    pub fn latest_heartbeats(&self) -> Vec<FleetHeartbeat> {
-        heartbeat::latest_heartbeats(self)
-    }
-
-    pub fn heartbeat_snapshot(&self, max_age: Duration) -> FleetHeartbeatSnapshot {
-        self.heartbeat_snapshot_at(OrbitEpoch::now(), max_age)
-    }
-
-    pub fn heartbeat_snapshot_at(
-        &self,
-        now: OrbitEpoch,
-        max_age: Duration,
-    ) -> FleetHeartbeatSnapshot {
-        heartbeat::heartbeat_snapshot(self, now, max_age)
     }
 }
 
