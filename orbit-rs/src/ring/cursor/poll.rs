@@ -5,8 +5,8 @@ use crate::ring::Frame;
 pub struct RingLoss {
     /// Counters older than the current ring window.
     pub overwritten: u64,
-    /// Counters inside the readable window whose slot was empty, torn,
-    /// wrapped, or carried an unexpected frame id.
+    /// Counters inside the readable window whose slot was definitively
+    /// unavailable, wrapped, corrupt, or carried an unexpected frame id.
     pub unavailable: u64,
 }
 
@@ -20,7 +20,7 @@ impl RingLoss {
     }
 }
 
-/// Result of walking a cursor to a ring head.
+/// Result of walking a cursor toward a ring claim head.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RingPoll {
     pub frames: Vec<Frame>,

@@ -161,9 +161,7 @@ impl Ring {
         RingSpec::new(self.capacity, self.payload_capacity)
     }
 
-    /// Monotonic head — number of writes ever performed. Slot index
-    /// of the most recent write is `(head() - 1) % capacity` once
-    /// `head() > 0`.
+    /// Monotonic claim head — number of counters reserved by writers.
     pub fn head(&self) -> u64 {
         self.write_pos.load(Ordering::Acquire)
     }
@@ -244,7 +242,15 @@ impl Ring {
             .clone()
     }
 
-    /// Clear all slots and reset the write head to zero.
+    pub(crate) fn read_state_at(&self, counter: u64) -> cursor::RingRead {
+        match self.read_at(counter) {
+            Some(frame) if frame.id.counter() == counter => cursor::RingRead::Ready(frame),
+            Some(frame) if frame.id.counter() > counter => cursor::RingRead::Unavailable,
+            Some(_) | None => cursor::RingRead::Pending,
+        }
+    }
+
+    /// Clear all slots and reset the claim head to zero.
     ///
     /// Intended for owner-controlled boot-time cleanup. Do not call
     /// while other threads are publishing to this ring.
@@ -272,6 +278,10 @@ impl cursor::RingFrameSource for Ring {
     fn read_at(&self, counter: u64) -> Option<Frame> {
         Ring::read_at(self, counter)
     }
+
+    fn read_state_at(&self, counter: u64) -> cursor::RingRead {
+        Ring::read_state_at(self, counter)
+    }
 }
 
 #[cfg(unix)]
@@ -290,6 +300,10 @@ impl cursor::RingFrameSource for shm::ShmRing {
 
     fn read_at(&self, counter: u64) -> Option<Frame> {
         shm::ShmRing::read_at(self, counter)
+    }
+
+    fn read_state_at(&self, counter: u64) -> cursor::RingRead {
+        shm::ShmRing::read_state_at(self, counter)
     }
 }
 

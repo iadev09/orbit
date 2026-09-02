@@ -272,11 +272,11 @@ impl Fleet {
         }
     }
 
-    /// Current head (write position) for type `T`'s ring. Lazily
+    /// Current claim head for type `T`'s ring. Lazily
     /// creates / attaches the ring on first access — important for
     /// cross-process readers, where a child process may need to
     /// attach to a SHM segment a peer already populated. Returns 0
-    /// when the ring is fresh / no writes have happened.
+    /// when the ring is fresh / no counters have been claimed.
     pub fn head<T: OrbitTyped>(&self) -> u64 {
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.get_or_create::<T>().head(),
@@ -303,6 +303,20 @@ impl Fleet {
         }
     }
 
+    pub(crate) fn read_state_at<T: OrbitTyped>(
+        &self,
+        counter: u64,
+    ) -> crate::ring::cursor::RingRead {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => r.get_or_create::<T>().read_state_at(counter),
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .map(|ring| ring.read_state_at(counter))
+                .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
+        }
+    }
+
     /// Capacity of the ring for type `T`. Lazily attaches the ring
     /// on first access. Falls back to `T::RING_SPEC.capacity` when
     /// SHM attach fails.
@@ -317,7 +331,7 @@ impl Fleet {
         }
     }
 
-    /// Clear the ring for `T` and reset its write head to zero.
+    /// Clear the ring for `T` and reset its claim head to zero.
     ///
     /// This is an owner-side boot cleanup primitive. It is safe for
     /// runtime state such as events and periodic metrics when the

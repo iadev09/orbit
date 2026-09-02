@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use orbit_rs::{
-    Fleet, Frame, NetId64, NodeId, OrbitTyped, Ring, RingCursor, RingFrameSource, RingSpec,
-    poll_ring,
+    Fleet, Frame, NetId64, NodeId, OrbitTyped, Ring, RingCursor, RingFrameSource, RingRead,
+    RingSpec, poll_ring,
 };
 
 #[derive(Clone, Debug)]
@@ -121,4 +121,58 @@ fn missing_or_unexpected_slots_report_unavailable() {
     assert_eq!(poll.frames.len(), 1);
     assert_eq!(&poll.frames[0].payload[..], b"ok");
     assert_eq!(cursor.next_counter(), 3);
+}
+
+#[test]
+fn pending_counter_does_not_advance_cursor() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DeferredSource {
+        committed: AtomicBool,
+    }
+
+    impl RingFrameSource for DeferredSource {
+        fn kind(&self) -> u8 {
+            CursorRecord::KIND
+        }
+
+        fn head(&self) -> u64 {
+            1
+        }
+
+        fn capacity(&self) -> usize {
+            4
+        }
+
+        fn read_at(&self, counter: u64) -> Option<Frame> {
+            self.committed.load(Ordering::Acquire).then(|| Frame {
+                id: NetId64::make(CursorRecord::KIND, 0, counter),
+                kind: 0,
+                ver: 0,
+                payload: Bytes::from_static(b"committed"),
+            })
+        }
+
+        fn read_state_at(&self, counter: u64) -> RingRead {
+            if !self.committed.load(Ordering::Acquire) {
+                return RingRead::Pending;
+            }
+            RingRead::Ready(self.read_at(counter).expect("committed frame"))
+        }
+    }
+
+    let source = DeferredSource {
+        committed: AtomicBool::new(false),
+    };
+    let mut cursor = RingCursor::from_start();
+
+    let pending = poll_ring(&source, &mut cursor);
+    assert!(pending.is_empty());
+    assert_eq!(cursor.next_counter(), 0);
+
+    source.committed.store(true, Ordering::Release);
+    let committed = poll_ring(&source, &mut cursor);
+    assert_eq!(committed.frames.len(), 1);
+    assert_eq!(&committed.frames[0].payload[..], b"committed");
+    assert_eq!(cursor.next_counter(), 1);
 }

@@ -59,7 +59,7 @@ pub use event::{
 pub use fleet::{Fleet, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
 pub use orbital::Orbital;
-pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, poll_ring};
+pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
 pub use ring::{Frame, Ring, RingSpec};
 
 /// Marker for a type that has a stable wire identity across the fleet.

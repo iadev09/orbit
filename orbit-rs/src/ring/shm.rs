@@ -318,7 +318,7 @@ impl ShmRing {
         unsafe { slot_ptr.cast::<u8>().add(SLOT_HEADER_SIZE) }
     }
 
-    /// Monotonic head — number of writes ever performed on this ring.
+    /// Monotonic claim head — number of counters reserved by writers.
     pub fn head(&self) -> u64 {
         self.header().write_pos.load(Ordering::Acquire)
     }
@@ -439,7 +439,42 @@ impl ShmRing {
         None
     }
 
-    /// Clear all slots and reset the write head to zero.
+    pub(crate) fn read_state_at(&self, counter: u64) -> crate::ring::cursor::RingRead {
+        use crate::ring::cursor::RingRead;
+
+        let slot_idx = (counter as usize) & (self.capacity - 1);
+        let slot_ptr = self.slot_ptr(slot_idx);
+        let expected_committed = counter
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(2))
+            .expect("seq overflow");
+
+        for _ in 0..3 {
+            let sequence = unsafe { &*slot_ptr }.seq.load(Ordering::Acquire);
+            if sequence < expected_committed {
+                return RingRead::Pending;
+            }
+            if sequence > expected_committed {
+                return RingRead::Unavailable;
+            }
+            if let Some(frame) = unsafe { read_committed_frame(slot_ptr, self.payload_capacity) } {
+                return if frame.id.counter() == counter {
+                    RingRead::Ready(frame)
+                } else {
+                    RingRead::Unavailable
+                };
+            }
+        }
+
+        let sequence = unsafe { &*slot_ptr }.seq.load(Ordering::Acquire);
+        if sequence < expected_committed {
+            RingRead::Pending
+        } else {
+            RingRead::Unavailable
+        }
+    }
+
+    /// Clear all slots and reset the claim head to zero.
     ///
     /// Intended for owner-controlled boot-time cleanup. Do not call
     /// while other processes are publishing to this ring: it rewrites
@@ -569,4 +604,54 @@ unsafe fn read_committed_frame(
         ver,
         payload: Bytes::from(payload_buf),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+    use crate::ring::cursor::{RingCursor, poll_ring};
+
+    #[test]
+    fn cursor_retries_a_claimed_slot_after_it_commits() {
+        static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+        let test_id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let fleet_name = format!("p{:x}{test_id:x}", std::process::id());
+        let ring = ShmRing::open_or_create(&fleet_name, 199, RingSpec::new(4, 16))
+            .expect("create test ring");
+        ring.reset();
+        let slot_ptr = ring.slot_ptr(0);
+
+        ring.header().write_pos.store(1, Ordering::Release);
+        unsafe { &*slot_ptr }.seq.store(1, Ordering::Release);
+
+        let mut cursor = RingCursor::from_start();
+        let pending = poll_ring(&ring, &mut cursor);
+        assert!(pending.is_empty());
+        assert_eq!(cursor.next_counter(), 0);
+
+        let payload = b"ready";
+        unsafe {
+            ptr::addr_of_mut!((*slot_ptr).id)
+                .write(NetId64::make(199, NodeId::ZERO.get(), 0).raw());
+            ptr::addr_of_mut!((*slot_ptr).ver).write(7);
+            ptr::addr_of_mut!((*slot_ptr).payload_len).write(payload.len() as u32);
+            ptr::addr_of_mut!((*slot_ptr).kind).write(1);
+            ptr::copy_nonoverlapping(
+                payload.as_ptr(),
+                ShmRing::payload_ptr(slot_ptr),
+                payload.len(),
+            );
+        }
+        unsafe { &*slot_ptr }.seq.store(2, Ordering::Release);
+
+        let committed = poll_ring(&ring, &mut cursor);
+        assert_eq!(committed.frames.len(), 1);
+        assert_eq!(&committed.frames[0].payload[..], payload);
+        assert_eq!(cursor.next_counter(), 1);
+
+        ring.unlink().expect("unlink test ring");
+    }
 }
