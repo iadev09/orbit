@@ -1,6 +1,6 @@
 use super::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead};
 
-/// Walk `cursor` toward the current claim head of `source`.
+/// Walk `cursor` toward the current visible head of `source`.
 ///
 /// At most one ring window is inspected. If the cursor has fallen behind
 /// the oldest available counter, the skipped counters are recorded as

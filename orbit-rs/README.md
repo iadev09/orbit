@@ -64,9 +64,17 @@ On Unix, shared-memory ring names are derived from:
 
 ## Rings
 
-A ring is one or more fixed-capacity circular append lanes. Shared rings
-use one multi-writer counter. Per-node rings give every fleet member an
-independent counter and disjoint slots. Frames are written into:
+A ring is one or more fixed-capacity circular append lanes. The topology
+defines how writers publish:
+
+- `Shared` uses one lock-free multi-writer reservation counter;
+- `PerNode` gives every fleet member an independent counter and disjoint
+  slots;
+- `SharedOrdered` uses one globally ordered counter, serializes the short
+  write section with a process-recoverable kernel lock, and advances its
+  head only after the slot commits.
+
+Frames are written into:
 
 ```text
 counter % capacity
@@ -77,6 +85,12 @@ a given `NodeId`. Concurrent tasks inside that process are serialized locally.
 An embedder that replaces a process must fully stop the old incarnation before
 reusing its node id; workloads that genuinely have multiple writers use
 `Shared` topology instead.
+
+`SharedOrdered` is for algorithms whose correctness depends on one total
+order. On Unix its advisory lock uses a state-free companion file at
+`/tmp/orbit-{fleet}-{kind}-{uid}.lock`; all frame data remains in SHM. If a
+writer process dies, the kernel releases the lock. A pre-head partial write
+is then reused by the next writer instead of leaving a permanent hole.
 
 The frame shape is:
 
@@ -210,6 +224,12 @@ claim typed subject
 
 Every peer may publish a claim. The earliest active claim receives a
 drop-released `Guard`; later claimants receive `YieldTo(holder)`.
+
+Contest uses one `SharedOrdered` ring, so the counters observed below the
+head are a complete global claim order across processes. The writer lock is
+held only while publishing one frame, not while the winner performs the
+guarded work. If the committed resident window cannot be read completely,
+Contest fails closed rather than choosing a winner from partial history.
 
 A subject is a caller-defined `ContestType::KIND` plus a label. The
 owner label is only for observation; Orbit does not interpret it.

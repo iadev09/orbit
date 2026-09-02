@@ -21,7 +21,7 @@ use crate::ring::cursor::{RingCursor, RingLoss};
 
 /// Contest frame payload limit for V0. On Unix this matches the SHM ring
 /// slot payload size; non-Unix keeps the same bounded contract.
-pub const CONTEST_RING_SPEC: RingSpec = RingSpec::new(1024, 256);
+pub const CONTEST_RING_SPEC: RingSpec = RingSpec::shared_ordered(1024, 256);
 pub const CONTEST_PAYLOAD_MAX: usize = CONTEST_RING_SPEC.payload_capacity;
 
 pub const CONTEST_RING_KIND: u8 = 222;
@@ -32,15 +32,6 @@ pub const CONTEST_FRAME_KIND_RENEW: u8 = 3;
 const CLAIM_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 8;
 const RELEASE_HEADER_LEN: usize = 8 + 1 + 2;
 const RENEW_HEADER_LEN: usize = 8 + 8 + 1 + 2;
-
-/// Bounded loss-driven re-polls a claim performs before deciding, when the
-/// ring window has torn/uncommitted slots that could hide an earlier claim.
-/// Each retry is a fresh poll separated only by a cooperative `yield_now` —
-/// never a timed sleep — so `try_claim` blocks no thread and is safe to call
-/// directly from an async runtime. A torn seqlock write commits in
-/// nanoseconds, so a few yields settle it; a slot that never commits is a
-/// crashed mid-write (no real claim) and the caller proceeds.
-const CLAIM_SETTLE_ATTEMPTS: u32 = 3;
 
 /// Dedicated ring record marker for contest frames.
 #[derive(Clone, Debug)]
@@ -173,57 +164,51 @@ impl Contest {
             self.fleet
                 .publish::<ContestRecord>(CONTEST_FRAME_KIND_CLAIM, now_ms, payload);
 
-        // Decide against a loss-aware view of the ring window. A bare snapshot
-        // can mistake a lower, not-yet-readable claim for "absent" and hand two
-        // peers the same subject; see FINDINGS "CONTEST (claude ultra)".
+        // SharedOrdered publishes the head only after each slot commits, so
+        // every counter below the observed head must be readable. The global
+        // counter is therefore the complete claim order, even across writers.
         //
         // - A strictly-earlier *visible* claim -> yield (any loss is moot:
         //   we lose regardless).
         // - We are the earliest visible claim on a clean window -> Claimed.
-        // - `unavailable` loss (a torn / uncommitted slot) -> re-poll a bounded
-        //   number of times, separated by a cooperative yield (never a sleep —
-        //   async-safe); each retry re-scans the window so the torn slot is
-        //   re-read once it commits. A slot that never commits is a crashed
-        //   mid-write, i.e. not a real claim, so we may proceed.
+        // - An unavailable committed counter means the resident snapshot could
+        //   not be reconstructed (for example, concurrent traffic wrapped a
+        //   slot while it was scanned). Fail closed instead of guessing that
+        //   an earlier claim did not exist.
         //
         // `poll_active` scans only the resident window from its floor, so normal
         // history aging is never mistaken for loss. A live claim pushed out of
         // the capacity-sized window by extreme write volume is a documented
         // limit, backed by fencing tokens ([`crate::contest::fence`]) at the
         // protected resource.
-        let mut attempt: u32 = 0;
-        loop {
-            let (earliest, loss) = self.poll_active(&subject, now_ms);
-            match earliest {
-                Some(holder) if holder.claim_id.counter() != claim_id.counter() => {
-                    let _ = self.release_id(&subject, claim_id, now_ms);
-                    return Ok(Claim::YieldTo(holder));
-                }
-                Some(holder) => {
-                    if loss.unavailable > 0 && attempt < CLAIM_SETTLE_ATTEMPTS {
-                        attempt += 1;
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    return Ok(Claim::Claimed(Guard::new(self.clone(), holder)));
-                }
-                None => {
-                    if loss.unavailable > 0 && attempt < CLAIM_SETTLE_ATTEMPTS {
-                        attempt += 1;
-                        std::thread::yield_now();
-                        continue;
-                    }
-                    // Subject is free but our own claim is not observable
-                    // (e.g. ttl == 0 born-expired). Preserve the prior
-                    // YieldTo(self) contract for that degenerate case.
-                    return Ok(Claim::YieldTo(Holder {
-                        claim_id,
-                        subject: subject.clone(),
-                        owner: owner.clone(),
-                        claimed_at_ms: now_ms,
-                        expires_at_ms,
-                    }));
-                }
+        let (earliest, loss) = self.poll_active(&subject, now_ms);
+        if let Some(holder) = earliest
+            .as_ref()
+            .filter(|holder| holder.claim_id.counter() != claim_id.counter())
+        {
+            let _ = self.release_id(&subject, claim_id, now_ms);
+            return Ok(Claim::YieldTo(holder.clone()));
+        }
+        if loss.unavailable > 0 {
+            let _ = self.release_id(&subject, claim_id, now_ms);
+            return Err(Error::ContestRingUnavailable {
+                unavailable: loss.unavailable,
+            });
+        }
+
+        match earliest {
+            Some(holder) => Ok(Claim::Claimed(Guard::new(self.clone(), holder))),
+            None => {
+                // Subject is free but our own claim is not observable
+                // (e.g. ttl == 0 born-expired). Preserve the prior
+                // YieldTo(self) contract for that degenerate case.
+                Ok(Claim::YieldTo(Holder {
+                    claim_id,
+                    subject: subject.clone(),
+                    owner: owner.clone(),
+                    claimed_at_ms: now_ms,
+                    expires_at_ms,
+                }))
             }
         }
     }
@@ -277,15 +262,17 @@ impl Contest {
     ///
     /// The loss is load-bearing: a caller must not treat "no holder found"
     /// as "subject free" when frames that could carry an earlier claim were
-    /// overwritten or were momentarily unreadable.
+    /// overwritten or became unavailable while the committed window was
+    /// scanned.
     fn poll_active(&self, subject: &ContestSubject, now_ms: u64) -> (Option<Holder>, RingLoss) {
         // Scan only the resident window, starting at its floor (head -
         // capacity). Starting from counter 0 would make `poll_ring` report the
         // entire scrolled-out history as `overwritten` — that is normal ring
         // aging, NOT a lost-frame signal, and on a mature ring it is always
         // non-zero, so it must never be treated as a loss. From the floor,
-        // `overwritten` is structurally 0; only `unavailable` (torn /
-        // uncommitted slots) is a real loss signal.
+        // `overwritten` is structurally 0. `unavailable` means the committed
+        // resident window could not be reconstructed, commonly because enough
+        // concurrent traffic wrapped a slot while this scan was in progress.
         let head = self.fleet.head::<ContestRecord>();
         let capacity = self.fleet.ring_capacity::<ContestRecord>() as u64;
         let mut cursor = RingCursor::from_counter(head.saturating_sub(capacity));

@@ -295,7 +295,8 @@ impl Fleet {
     }
 
     /// Current head for type `T`'s ring. Per-node rings report this fleet
-    /// handle's local committed head; shared rings report their claim head.
+    /// handle's local committed head; shared rings report their sole lane's
+    /// visible head.
     /// Lazily
     /// creates / attaches the ring on first access — important for
     /// cross-process readers, where a child process may need to

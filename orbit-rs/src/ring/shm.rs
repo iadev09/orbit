@@ -13,7 +13,10 @@
 //! └──────────────────────────┴───────────────────────────┴──────────────┘
 //! ```
 //!
-//! Shared topology retains the multi-writer claim-before-commit protocol.
+//! Shared topology retains the lock-free multi-writer claim-before-commit
+//! protocol. Shared-ordered topology serializes writers with a
+//! process-recoverable kernel advisory lock, commits the slot, and only then
+//! advances the head.
 //! Per-node topology assigns disjoint slots to every node and requires one
 //! active process per node id. Concurrent tasks inside that process are
 //! serialized locally, and the lane head is published only after the slot
@@ -128,7 +131,7 @@ fn lane_count_for(spec: RingSpec, fleet_size: u8) -> std::io::Result<usize> {
         return Err(invalid_input("ShmRing fleet size must be > 0"));
     }
     Ok(match spec.topology {
-        RingTopology::Shared => 1,
+        RingTopology::Shared | RingTopology::SharedOrdered => 1,
         RingTopology::PerNode => usize::from(fleet_size),
     })
 }
@@ -230,7 +233,12 @@ impl ShmRing {
             .checked_mul(slot_stride)
             .ok_or_else(|| invalid_input("ShmRing lane stride overflow"))?;
         let name = shm::ring_segment_name(fleet_name, kind);
-        let region = ShmRegion::open_or_create(&name, size)?;
+        let (region, _initialization_lock) = if spec.topology == RingTopology::SharedOrdered {
+            let (region, lock) = ShmRegion::open_or_create_locked(&name, size)?;
+            (region, Some(lock))
+        } else {
+            (ShmRegion::open_or_create(&name, size)?, None)
+        };
 
         // Initialize header on first creation; subsequent attachers
         // skip and rely on whatever the creator wrote.
@@ -487,6 +495,19 @@ impl ShmRing {
                     .store(counter.wrapping_add(1), Ordering::Release);
                 Ok(id)
             }
+            RingTopology::SharedOrdered => {
+                let _write = self.write_locks[lane]
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let _cross_process = self.region.lock_exclusive()?;
+                let lane_header = self.lane_header(lane);
+                let counter = lane_header.write_pos.load(Ordering::Relaxed);
+                let id = self.write_slot(lane, node_id, counter, frame_kind, ver, &payload);
+                lane_header
+                    .write_pos
+                    .store(counter.wrapping_add(1), Ordering::Release);
+                Ok(id)
+            }
         }
     }
 
@@ -588,7 +609,7 @@ impl ShmRing {
         for _ in 0..3 {
             let sequence = unsafe { &*slot_ptr }.seq.load(Ordering::Acquire);
             if sequence < expected_committed {
-                return if self.topology == RingTopology::PerNode {
+                return if self.topology != RingTopology::Shared {
                     RingRead::Unavailable
                 } else {
                     RingRead::Pending
@@ -608,7 +629,7 @@ impl ShmRing {
 
         let sequence = unsafe { &*slot_ptr }.seq.load(Ordering::Acquire);
         if sequence < expected_committed {
-            if self.topology == RingTopology::PerNode {
+            if self.topology != RingTopology::Shared {
                 RingRead::Unavailable
             } else {
                 RingRead::Pending
@@ -637,7 +658,7 @@ impl ShmRing {
 
     fn lane_index(&self, node_id: NodeId) -> usize {
         let lane = match self.topology {
-            RingTopology::Shared => 0,
+            RingTopology::Shared | RingTopology::SharedOrdered => 0,
             RingTopology::PerNode => usize::from(node_id.get()),
         };
         assert!(
@@ -651,7 +672,7 @@ impl ShmRing {
 
     fn lane_index_for_frame(&self, id: NetId64) -> Option<usize> {
         let lane = match self.topology {
-            RingTopology::Shared => 0,
+            RingTopology::Shared | RingTopology::SharedOrdered => 0,
             RingTopology::PerNode => usize::from(id.node()),
         };
         (lane < self.lane_count).then_some(lane)
@@ -816,6 +837,9 @@ unsafe fn read_committed_frame(
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use nix::sys::wait::{WaitStatus, waitpid};
+    use nix::unistd::{ForkResult, fork};
+
     use super::*;
     use crate::ring::cursor::{RingCursor, poll_ring};
 
@@ -927,5 +951,62 @@ mod tests {
         assert_eq!(ring.lane_head(NodeId::new(1)), 256);
 
         ring.unlink().expect("unlink test ring");
+    }
+
+    #[test]
+    fn shared_ordered_recovers_after_a_locked_writer_process_dies() {
+        static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+        let test_id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let fleet_name = format!("o{:x}{test_id:x}", std::process::id());
+        let spec = RingSpec::shared_ordered(4, 16);
+        let ring = ShmRing::open_or_create_for_fleet(&fleet_name, 196, spec, 2)
+            .expect("create shared-ordered test ring");
+        ring.reset();
+
+        match unsafe { fork() }.expect("fork test writer") {
+            ForkResult::Child => {
+                // Use the handle inherited while it was idle. It must not carry
+                // a persistent lock descriptor across fork; the child opens a
+                // fresh file description for this critical section.
+                let _lock = ring.region.lock_exclusive().expect("child locks ring");
+                let slot_ptr = ring.slot_ptr(0, 0);
+                unsafe { &*slot_ptr }.seq.store(1, Ordering::Release);
+
+                // Exit without destructors: the kernel, not Rust cleanup,
+                // must release the descriptor lock.
+                unsafe { libc::_exit(0) };
+            }
+            ForkResult::Parent { child } => {
+                let status = waitpid(child, None).expect("wait for abandoned writer");
+                assert!(matches!(status, WaitStatus::Exited(_, 0)));
+
+                // A separately opened handle must acquire the lock after the
+                // child dies. If the original region retained an idle flock fd,
+                // fork would duplicate its open-file-description into the child
+                // and the dead writer's lock would still be attached here.
+                let replacement = ShmRing::open_or_create_for_fleet(&fleet_name, 196, spec, 2)
+                    .expect("replacement attaches");
+                let recovered_lock = replacement
+                    .region
+                    .try_lock_exclusive()
+                    .expect("kernel released dead writer lock");
+                drop(recovered_lock);
+
+                let id = replacement
+                    .write(NodeId::new(1), 1, 9, Bytes::from_static(b"recovered"))
+                    .expect("replacement commits counter zero");
+                assert_eq!(id.counter(), 0);
+                assert_eq!(replacement.head(), 1);
+                assert_eq!(
+                    &replacement.read(id).expect("recovered frame").payload[..],
+                    b"recovered"
+                );
+
+                replacement
+                    .unlink()
+                    .expect("unlink shared-ordered test ring");
+            }
+        }
     }
 }

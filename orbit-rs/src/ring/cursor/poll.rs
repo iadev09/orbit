@@ -20,7 +20,7 @@ impl RingLoss {
     }
 }
 
-/// Result of walking a cursor toward a ring claim head.
+/// Result of walking a cursor toward a ring's visible head.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RingPoll {
     pub frames: Vec<Frame>,

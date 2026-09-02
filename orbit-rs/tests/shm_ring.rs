@@ -188,3 +188,40 @@ fn zero_payload_ring_accepts_only_empty_frames() {
 
     let _ = ring.unlink();
 }
+
+#[test]
+fn shared_ordered_serializes_independent_writer_handles() {
+    use std::sync::{Arc, Barrier};
+
+    let name = fresh_name();
+    let ring_spec = RingSpec::shared_ordered(2048, 0);
+    let first = Arc::new(ShmRing::open_or_create(&name, 16, ring_spec).unwrap());
+    let second = Arc::new(ShmRing::open_or_create(&name, 16, ring_spec).unwrap());
+    first.reset();
+    let barrier = Arc::new(Barrier::new(3));
+
+    let spawn_writer = |ring: Arc<ShmRing>, node_id: NodeId, barrier: Arc<Barrier>| {
+        std::thread::spawn(move || {
+            barrier.wait();
+            (0..1000)
+                .map(|_| ring.write(node_id, 1, 0, Bytes::new()).unwrap().counter())
+                .collect::<Vec<_>>()
+        })
+    };
+    let writer_one = spawn_writer(first.clone(), NodeId::new(1), barrier.clone());
+    let writer_two = spawn_writer(second, NodeId::new(2), barrier.clone());
+    barrier.wait();
+
+    let mut counters = writer_one.join().unwrap();
+    counters.extend(writer_two.join().unwrap());
+    counters.sort_unstable();
+
+    assert_eq!(counters, (0..2000).collect::<Vec<_>>());
+    assert_eq!(first.head(), 2000);
+    for counter in 0..2000 {
+        let frame = first.read_at(counter).expect("ordered frame retained");
+        assert_eq!(frame.id.counter(), counter);
+    }
+
+    first.unlink().unwrap();
+}

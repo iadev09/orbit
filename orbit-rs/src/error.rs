@@ -37,6 +37,9 @@ pub enum Error {
         max_payload: usize,
     },
 
+    /// Contest could not reconstruct its committed ordered window safely.
+    ContestRingUnavailable { unavailable: u64 },
+
     /// An RPC request or reply could not fit into its lane payload.
     RpcFrameTooLarge {
         frame: &'static str,
@@ -90,6 +93,12 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "orbit contest frame too large: subject_len={subject_len} owner_len={owner_len} max_payload={max_payload}"
+                )
+            }
+            Self::ContestRingUnavailable { unavailable } => {
+                write!(
+                    f,
+                    "orbit contest ordered ring has {unavailable} unavailable committed frame(s)"
                 )
             }
             Self::RpcFrameTooLarge {

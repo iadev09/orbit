@@ -8,10 +8,11 @@
 //! ## Shape
 //!
 //! One [`Ring`] per [`OrbitTyped`] kind. A ring is one or more fixed-size
-//! circular lanes of [`Frame`]s. Shared rings use one multi-writer claim
-//! sequence. Per-node rings give every fleet member a disjoint lane whose
-//! head advances only after a frame is committed. When a lane head exceeds
-//! its capacity, the oldest slot in that lane is overwritten.
+//! circular lanes of [`Frame`]s. Shared rings use one lock-free multi-writer
+//! claim sequence. Shared-ordered rings serialize writers and expose only
+//! committed counters. Per-node rings give every fleet member a disjoint lane
+//! whose head advances only after a frame is committed. When a lane head
+//! exceeds its capacity, the oldest slot in that lane is overwritten.
 //!
 //! The frame layout mirrors the `nwd1` seed (see VISION §13):
 //!
@@ -68,6 +69,10 @@ pub enum RingTopology {
     /// The embedder must not run two active processes with the same node id;
     /// local concurrent tasks are serialized by the ring handle.
     PerNode = 1,
+    /// Every fleet member publishes into one globally ordered sequence.
+    /// Writers are serialized by a process-recoverable OS lock associated
+    /// with the SHM name, and the head advances only after the slot commits.
+    SharedOrdered = 2,
 }
 
 /// Physical policy for one [`OrbitTyped`] ring.
@@ -80,7 +85,7 @@ pub struct RingSpec {
     pub capacity: usize,
     /// Maximum payload bytes stored inline in each slot.
     pub payload_capacity: usize,
-    /// Whether writers share one sequence or own node-local lanes.
+    /// How writers own and publish physical lanes.
     pub topology: RingTopology,
 }
 
@@ -99,6 +104,15 @@ impl RingSpec {
             capacity,
             payload_capacity,
             topology: RingTopology::PerNode,
+        }
+    }
+
+    /// Declare one crash-recoverable, globally ordered writer lane.
+    pub const fn shared_ordered(capacity: usize, payload_capacity: usize) -> Self {
+        Self {
+            capacity,
+            payload_capacity,
+            topology: RingTopology::SharedOrdered,
         }
     }
 
@@ -174,7 +188,7 @@ impl Ring {
         spec.assert_valid();
         let capacity = spec.capacity;
         let lane_count = match spec.topology {
-            RingTopology::Shared => 1,
+            RingTopology::Shared | RingTopology::SharedOrdered => 1,
             RingTopology::PerNode => usize::from(fleet_size),
         };
         let mut lanes = Vec::with_capacity(lane_count);
@@ -248,7 +262,7 @@ impl Ring {
                 let counter = lane.write_pos.fetch_add(1, Ordering::AcqRel);
                 self.write_frame(lane, node_id, counter, frame_kind, ver, payload)
             }
-            RingTopology::PerNode => {
+            RingTopology::PerNode | RingTopology::SharedOrdered => {
                 let _write = lane
                     .write_lock
                     .lock()
@@ -332,7 +346,7 @@ impl Ring {
         match self.read_lane_at(node_id, counter) {
             Some(frame) if frame.id.counter() == counter => cursor::RingRead::Ready(frame),
             Some(frame) if frame.id.counter() > counter => cursor::RingRead::Unavailable,
-            Some(_) | None if self.topology == RingTopology::PerNode => {
+            Some(_) | None if self.topology != RingTopology::Shared => {
                 cursor::RingRead::Unavailable
             }
             Some(_) | None => cursor::RingRead::Pending,
@@ -354,7 +368,7 @@ impl Ring {
 
     fn lane(&self, node_id: NodeId) -> &RingLane {
         let index = match self.topology {
-            RingTopology::Shared => 0,
+            RingTopology::Shared | RingTopology::SharedOrdered => 0,
             RingTopology::PerNode => usize::from(node_id.get()),
         };
         self.lanes.get(index).unwrap_or_else(|| {
@@ -368,7 +382,7 @@ impl Ring {
 
     fn lane_for_frame(&self, id: NetId64) -> Option<&RingLane> {
         let index = match self.topology {
-            RingTopology::Shared => 0,
+            RingTopology::Shared | RingTopology::SharedOrdered => 0,
             RingTopology::PerNode => usize::from(id.node()),
         };
         self.lanes.get(index)

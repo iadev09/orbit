@@ -21,7 +21,8 @@ pub trait RingFrameSource {
     /// The `OrbitTyped::KIND` carried by this ring.
     fn kind(&self) -> u8;
 
-    /// Monotonic claim head: number of counters reserved by writers.
+    /// Monotonic visible head. Depending on topology, this counts counters
+    /// reserved by writers or frames committed by writers.
     fn head(&self) -> u64;
 
     /// Fixed slot count for this ring.
