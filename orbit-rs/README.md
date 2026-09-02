@@ -206,6 +206,26 @@ OrbitEventBus::publish(topic, payload)
   -> poll() / poll_topic()
 ```
 
+On Linux, an SHM-backed event bus can also create a process-local
+`RingEventFd`. A committed publish increments a shared futex generation and
+wakes every listener. Each listener converts that broadcast into readiness on
+its own eventfd, which can be registered with epoll or an async runtime. The fd
+contains no event data and is not a delivery counter: consumers drain it, then
+bulk-poll the ring with their own cursor. Several publishes may coalesce into
+one readiness wake without losing resident ring frames.
+
+The eventfd is deliberately not shared between fleet processes. Eventfd reads
+consume its counter, which would turn a shared descriptor into load-balancing
+rather than broadcast delivery. Other Unix targets continue to use caller-owned
+polling until they gain a native notification backend.
+
+Run the Linux suite natively on an Apple Silicon development host with:
+
+```sh
+docker build --platform linux/arm64 -t orbit-rs-linux-arm64 .
+docker run --rm --platform linux/arm64 orbit-rs-linux-arm64
+```
+
 Typed dispatch, application lifecycle hooks, acknowledgements, durable
 replay, and consumer groups belong above this primitive.
 

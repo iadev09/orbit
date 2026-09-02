@@ -10,6 +10,8 @@ use dashmap::DashMap;
 use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::id::NetId64;
+#[cfg(target_os = "linux")]
+use crate::ring::RingEventFd;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
 use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
@@ -423,6 +425,40 @@ impl Fleet {
             RingBacking::Shm(r) => {
                 r.get_or_create_for::<T>()?.reset();
                 Ok(())
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn ring_event_fd<T: OrbitTyped>(&self) -> std::io::Result<RingEventFd> {
+        match &self.inner.backing {
+            RingBacking::Shm(rings) => RingEventFd::new(rings.get_or_create_for::<T>()?),
+            RingBacking::InMemory(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Orbit eventfd requires a shared-memory fleet",
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn publish_notified<T: OrbitTyped>(
+        &self,
+        frame_kind: u8,
+        ver: u64,
+        payload: Bytes,
+    ) -> std::io::Result<NetId64> {
+        match &self.inner.backing {
+            RingBacking::Shm(rings) => {
+                let ring = rings.get_or_create_for::<T>()?;
+                let id = ring.write(self.node_id(), frame_kind, ver, payload)?;
+                RingEventFd::notify(&ring)?;
+                Ok(id)
+            }
+            // Process-local fleets do not need a kernel wake bridge.
+            RingBacking::InMemory(rings) => {
+                Ok(rings
+                    .get_or_create::<T>()
+                    .write(self.node_id(), frame_kind, ver, payload))
             }
         }
     }

@@ -56,7 +56,7 @@
 
 use std::ptr;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bytes::Bytes;
 
@@ -85,9 +85,13 @@ struct ShmRingHeader {
     kind: u8,
     topology: u8,
     lane_count: u16,
+    /// Linux futex word used by notification-enabled ring users.
+    /// It lives in the existing reserved header space, so the V3
+    /// layout remains compatible with already-created segments.
+    notification_generation: AtomicU32,
     /// Explicitly fills one cache line; field order avoids implicit
     /// alignment padding that would otherwise make this header 128B.
-    _reserved: [u8; 28],
+    _reserved: [u8; 24],
 }
 
 #[repr(C, align(64))]
@@ -259,7 +263,8 @@ impl ShmRing {
                         kind,
                         topology: spec.topology as u8,
                         lane_count: lane_count as u16,
-                        _reserved: [0; 28],
+                        notification_generation: AtomicU32::new(0),
+                        _reserved: [0; 24],
                     },
                 );
 
@@ -423,6 +428,13 @@ impl ShmRing {
                 .as_ptr()
                 .add(HEADER_SIZE + lane * LANE_HEADER_SIZE) as *const ShmLaneHeader)
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn notification_generation(&self) -> &AtomicU32 {
+        // SAFETY: the mapped header was initialized before this ring handle
+        // was returned and remains mapped for the lifetime of `self`.
+        unsafe { &(*(self.region.as_ptr() as *const ShmRingHeader)).notification_generation }
     }
 
     fn slot_ptr(&self, lane: usize, idx: usize) -> *mut ShmSlotHeader {

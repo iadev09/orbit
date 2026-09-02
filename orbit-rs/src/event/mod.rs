@@ -18,6 +18,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crate::error::{Error, Result};
 use crate::fleet::{Fleet, FleetLaneCursor, NodeId};
 use crate::id::NetId64;
+#[cfg(target_os = "linux")]
+use crate::ring::RingEventFd;
 use crate::{OrbitTyped, RingSpec};
 
 /// Event frame payload limit for V0. This is the event lane's own SHM
@@ -139,13 +141,33 @@ impl OrbitEventBus {
             .map_err(Error::Io)
     }
 
+    /// Create this process' Linux fd readiness bridge for the event ring.
+    ///
+    /// The returned fd is local to this process. Publishers notify a shared
+    /// futex generation after committing an event; the bridge converts that
+    /// broadcast into local fd readiness suitable for epoll/AsyncFd. Drain the
+    /// fd, then poll the ring with this subscriber's cursor.
+    #[cfg(target_os = "linux")]
+    pub fn event_fd(&self) -> Result<RingEventFd> {
+        self.fleet
+            .ring_event_fd::<OrbitEventRecord>()
+            .map_err(Error::Io)
+    }
+
     /// Publish one event under `topic`.
     pub fn publish(&self, topic: &str, payload: &[u8]) -> Result<NetId64> {
         let timestamp_ms = now_ms();
         let frame = encode_frame(topic.as_bytes(), payload, timestamp_ms)?;
-        Ok(self
+        #[cfg(target_os = "linux")]
+        let id = self
             .fleet
-            .publish::<OrbitEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame))
+            .publish_notified::<OrbitEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame)
+            .map_err(Error::Io)?;
+        #[cfg(not(target_os = "linux"))]
+        let id = self
+            .fleet
+            .publish::<OrbitEventRecord>(FRAME_KIND_EVENT, timestamp_ms, frame);
+        Ok(id)
     }
 
     /// Poll all events since `cursor`, advancing the cursor to the

@@ -9,6 +9,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
+
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
 use orbit_rs::ring_shm::ShmRing;
@@ -54,6 +61,17 @@ fn cleanup_event_ring(name: &str) {
     if let Ok(ring) = ShmRing::open_or_create_for_fleet(name, EVENT_RING_KIND, EVENT_RING_SPEC, 2) {
         let _ = ring.unlink();
     }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_until_readable(fd: &impl AsRawFd) -> bool {
+    let mut poll_fd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 2_000) };
+    ready == 1 && poll_fd.revents & libc::POLLIN != 0
 }
 
 #[test]
@@ -143,4 +161,92 @@ fn parent_publishes_child_polls_event() {
             std::process::exit(0);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cross_process_publish_wakes_process_local_event_fd() {
+    let name = fresh_name();
+    let parent_fleet =
+        Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
+    let parent_bus = OrbitEventBus::new(parent_fleet);
+    parent_bus.reset_ring().expect("reset event ring");
+    let (mut parent_ready, mut child_ready) = UnixStream::pair().expect("ready socket pair");
+
+    match unsafe { fork() }.expect("fork") {
+        ForkResult::Parent { child } => {
+            drop(child_ready);
+            let mut ready = [0u8; 1];
+            parent_ready
+                .read_exact(&mut ready)
+                .expect("child listener ready");
+            parent_bus
+                .publish("test.eventfd", b"wake-child")
+                .expect("publish event");
+
+            let code = wait_child(child);
+            cleanup_event_ring(name);
+            assert_eq!(code, 0, "child reported failure (exit {code})");
+        }
+        ForkResult::Child => {
+            drop(parent_ready);
+            let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {
+                Ok(fleet) => Arc::new(fleet),
+                Err(_) => std::process::exit(31),
+            };
+            let child_bus = OrbitEventBus::new(child_fleet);
+            let event_fd = match child_bus.event_fd() {
+                Ok(event_fd) => event_fd,
+                Err(_) => std::process::exit(32),
+            };
+            let mut cursor = child_bus.cursor_at_head();
+            if child_ready.write_all(&[1]).is_err() {
+                std::process::exit(33);
+            }
+
+            if !wait_until_readable(&event_fd) {
+                std::process::exit(34);
+            }
+            if event_fd.drain().is_err() {
+                std::process::exit(35);
+            }
+            let events = child_bus.poll(&mut cursor);
+            if events.lagged != 0 || events.events.len() != 1 {
+                std::process::exit(36);
+            }
+            let event = &events.events[0];
+            if event.topic != "test.eventfd" || event.payload != b"wake-child" {
+                std::process::exit(37);
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn one_publish_wakes_each_process_local_event_fd() {
+    let name = fresh_name();
+    let bus_a = OrbitEventBus::new(Arc::new(
+        Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("node zero join_shm"),
+    ));
+    let bus_b = OrbitEventBus::new(Arc::new(
+        Fleet::join_shm_as(name, 2, NodeId::new(1)).expect("node one join_shm"),
+    ));
+    bus_a.reset_ring().expect("reset event ring");
+
+    let event_fd_a = bus_a.event_fd().expect("node zero eventfd");
+    let event_fd_b = bus_b.event_fd().expect("node one eventfd");
+    bus_a
+        .publish("test.broadcast", b"wake-every-listener")
+        .expect("publish event");
+
+    assert!(wait_until_readable(&event_fd_a));
+    assert!(wait_until_readable(&event_fd_b));
+    assert!(event_fd_a.drain().expect("drain node zero") > 0);
+    assert!(event_fd_b.drain().expect("drain node one") > 0);
+
+    drop(event_fd_a);
+    drop(event_fd_b);
+    cleanup_event_ring(name);
 }
