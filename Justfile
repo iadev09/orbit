@@ -3,9 +3,17 @@ set shell := ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-# Native Linux smoke suite used by xd01 and Gitea Actions.
+# Native smoke suite used by Linux/FreeBSD Gitea Actions runners.
 smoke:
-    test "$(uname -s)" = "Linux"
+    uname -a
     rustc --version
     cargo --version
     cargo test -p orbit-rs --all-targets
+
+smoke-linux:
+    test "$(uname -s)" = "Linux"
+    just smoke
+
+smoke-freebsd:
+    test "$(uname -s)" = "FreeBSD"
+    just smoke

@@ -226,13 +226,17 @@ docker build --platform linux/arm64 -t orbit-rs-linux-arm64 .
 docker run --rm --platform linux/arm64 orbit-rs-linux-arm64
 ```
 
-On an existing native Linux checkout, the same smoke suite is available as:
+On existing native Linux and FreeBSD checkouts, run the platform guard plus
+the shared smoke suite with:
 
 ```sh
-just smoke
+just smoke-linux
+just smoke-freebsd
 ```
 
-The Gitea Actions workflow runs this recipe on every push.
+Both commands delegate to `just smoke`. Gitea Actions targets the native Rust
+runner registered by each Gitea instance and runs that shared recipe on every
+push.
 
 Typed dispatch, application lifecycle hooks, acknowledgements, durable
 replay, and consumer groups belong above this primitive.

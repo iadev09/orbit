@@ -5,12 +5,10 @@ on:
   push:
 
 jobs:
-  rust-trixie-arm64:
-    runs-on: rust-ci-trixie
+  native-arm64:
+    runs-on: rust-ci-native
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Native Linux environment
-        run: uname -a
       - name: Orbit smoke test
         run: just smoke
