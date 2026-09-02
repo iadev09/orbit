@@ -51,18 +51,21 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
 }
 
 fn cleanup_event_ring(name: &str) {
-    if let Ok(ring) = ShmRing::open_or_create(name, EVENT_RING_KIND, EVENT_RING_SPEC) {
+    if let Ok(ring) = ShmRing::open_or_create_for_fleet(name, EVENT_RING_KIND, EVENT_RING_SPEC, 2) {
         let _ = ring.unlink();
     }
 }
 
 #[test]
-fn child_publishes_parent_polls_event() {
+fn two_nodes_publish_into_independent_lanes() {
     let name = fresh_name();
     let parent_fleet =
         Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent join_shm"));
     let parent_bus = OrbitEventBus::new(parent_fleet);
     let mut cursor = parent_bus.cursor_at_head();
+    parent_bus
+        .publish("test.parent_also", b"hello-from-parent")
+        .expect("parent publish");
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Parent { child } => {
@@ -73,17 +76,14 @@ fn child_publishes_parent_polls_event() {
             cleanup_event_ring(name);
 
             assert_eq!(poll.lagged, 0);
-            assert_eq!(poll.events.len(), 1);
-            let event = &poll.events[0];
-            println!(
-                "parent saw OrbitEvent id={} topic={} payload={}",
-                event.id,
-                event.topic,
-                String::from_utf8_lossy(&event.payload)
-            );
-            assert_eq!(event.id.node(), 1);
-            assert_eq!(event.topic, "test.child_published");
-            assert_eq!(event.payload, b"hello-from-child");
+            assert_eq!(poll.events.len(), 2);
+            assert_eq!(poll.events[0].id.node(), 0);
+            assert_eq!(poll.events[0].id.counter(), 0);
+            assert_eq!(poll.events[0].topic, "test.parent_also");
+            assert_eq!(poll.events[1].id.node(), 1);
+            assert_eq!(poll.events[1].id.counter(), 0);
+            assert_eq!(poll.events[1].topic, "test.child_published");
+            assert_eq!(poll.events[1].payload, b"hello-from-child");
         }
         ForkResult::Child => {
             let child_fleet = match Fleet::join_shm_as(name, 2, NodeId::new(1)) {

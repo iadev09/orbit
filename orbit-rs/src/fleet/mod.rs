@@ -12,9 +12,10 @@ use crate::error::{Error, Result};
 use crate::id::NetId64;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
-use crate::ring::{Frame, Ring, RingRegistry};
+use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
 
 mod cursor;
+pub(crate) use cursor::FleetLaneCursor;
 
 /// A node's slot inside the fleet — assigned at `join` time.
 ///
@@ -93,13 +94,19 @@ impl Fleet {
         if fleet_size == 0 {
             return Err(Error::EmptyFleet);
         }
+        if node_id.get() >= u16::from(fleet_size) {
+            return Err(Error::NodeOutsideFleet {
+                node_id: node_id.get(),
+                fleet_size,
+            });
+        }
         Ok(Self {
             inner: Arc::new(FleetInner {
                 name,
                 fleet_size,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::InMemory(RingRegistry::new()),
+                backing: RingBacking::InMemory(RingRegistry::new(fleet_size)),
             }),
         })
     }
@@ -121,10 +128,20 @@ impl Fleet {
     }
 
     /// Join (or create) a SHM-backed fleet with an explicit node id.
+    ///
+    /// Per-node rings require one active process membership per node id.
+    /// Orbit validates the id range but does not own process lifecycle and
+    /// therefore cannot prevent duplicate live memberships.
     #[cfg(unix)]
     pub fn join_shm_as(name: &'static str, fleet_size: u8, node_id: NodeId) -> Result<Self> {
         if fleet_size == 0 {
             return Err(Error::EmptyFleet);
+        }
+        if node_id.get() >= u16::from(fleet_size) {
+            return Err(Error::NodeOutsideFleet {
+                node_id: node_id.get(),
+                fleet_size,
+            });
         }
         Ok(Self {
             inner: Arc::new(FleetInner {
@@ -132,7 +149,7 @@ impl Fleet {
                 fleet_size,
                 node_id,
                 id_counters: DashMap::new(),
-                backing: RingBacking::Shm(ShmRingRegistry::new(name)),
+                backing: RingBacking::Shm(ShmRingRegistry::new(name, fleet_size)),
             }),
         })
     }
@@ -218,10 +235,9 @@ impl Fleet {
         }
     }
 
-    /// Publish a payload to the ring for type `T`. Mints a
-    /// [`NetId64`] (atomic with slot reservation), writes the
-    /// [`Frame`] to the appropriate ring (in-memory or SHM), and
-    /// returns the id.
+    /// Publish a payload to the ring for type `T`. Mints a [`NetId64`],
+    /// writes the [`Frame`] to the appropriate shared or node-owned lane,
+    /// and returns the id.
     ///
     /// # Panics
     ///
@@ -256,9 +272,15 @@ impl Fleet {
         }
     }
 
-    /// Read the most recent frame for type `T` (head - 1 in the ring).
-    /// Returns `None` if no write has happened yet.
+    /// Read the most recent frame for type `T`. Per-node rings read this
+    /// fleet handle's local lane; shared rings read their sole lane.
     pub fn read_head<T: OrbitTyped>(&self) -> Option<Frame> {
+        if T::RING_SPEC.topology == RingTopology::PerNode {
+            let head = self.lane_head::<T>(self.node_id());
+            return (head > 0)
+                .then(|| self.read_lane_at::<T>(self.node_id(), head - 1))
+                .flatten();
+        }
         match &self.inner.backing {
             RingBacking::InMemory(r) => {
                 let ring = r.get_or_create::<T>();
@@ -272,12 +294,17 @@ impl Fleet {
         }
     }
 
-    /// Current claim head for type `T`'s ring. Lazily
+    /// Current head for type `T`'s ring. Per-node rings report this fleet
+    /// handle's local committed head; shared rings report their claim head.
+    /// Lazily
     /// creates / attaches the ring on first access — important for
     /// cross-process readers, where a child process may need to
     /// attach to a SHM segment a peer already populated. Returns 0
     /// when the ring is fresh / no counters have been claimed.
     pub fn head<T: OrbitTyped>(&self) -> u64 {
+        if T::RING_SPEC.topology == RingTopology::PerNode {
+            return self.lane_head::<T>(self.node_id());
+        }
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.get_or_create::<T>().head(),
             #[cfg(unix)]
@@ -288,14 +315,17 @@ impl Fleet {
         }
     }
 
-    /// Read whatever frame currently occupies the slot at
-    /// `counter % capacity` for type `T`'s ring. Lazily attaches
+    /// Read whatever frame currently occupies `counter % capacity`.
+    /// Per-node rings read this fleet handle's local lane. Lazily attaches
     /// the ring on first access (same rationale as [`Fleet::head`]).
     /// Returns `None` if the slot is empty/torn or attach fails.
     ///
     /// Used by walking readers; for typed handle-based reads,
     /// prefer [`Fleet::read`].
     pub fn read_at<T: OrbitTyped>(&self, counter: u64) -> Option<Frame> {
+        if T::RING_SPEC.topology == RingTopology::PerNode {
+            return self.read_lane_at::<T>(self.node_id(), counter);
+        }
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.get_or_create::<T>().read_at(counter),
             #[cfg(unix)]
@@ -307,12 +337,56 @@ impl Fleet {
         &self,
         counter: u64,
     ) -> crate::ring::cursor::RingRead {
+        if T::RING_SPEC.topology == RingTopology::PerNode {
+            return self.read_lane_state_at::<T>(self.node_id(), counter);
+        }
         match &self.inner.backing {
             RingBacking::InMemory(r) => r.get_or_create::<T>().read_state_at(counter),
             #[cfg(unix)]
             RingBacking::Shm(r) => r
                 .get_or_create_for::<T>()
                 .map(|ring| ring.read_state_at(counter))
+                .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
+        }
+    }
+
+    /// Current head for one physical node lane.
+    ///
+    /// On a shared ring every node id addresses the sole shared lane.
+    pub fn lane_head<T: OrbitTyped>(&self, node_id: NodeId) -> u64 {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => r.get_or_create::<T>().lane_head(node_id),
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .map(|ring| ring.lane_head(node_id))
+                .unwrap_or(0),
+        }
+    }
+
+    /// Read the frame currently occupying one node lane's counter slot.
+    pub fn read_lane_at<T: OrbitTyped>(&self, node_id: NodeId, counter: u64) -> Option<Frame> {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => r.get_or_create::<T>().read_lane_at(node_id, counter),
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .ok()?
+                .read_lane_at(node_id, counter),
+        }
+    }
+
+    pub(crate) fn read_lane_state_at<T: OrbitTyped>(
+        &self,
+        node_id: NodeId,
+        counter: u64,
+    ) -> crate::ring::cursor::RingRead {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => r.get_or_create::<T>().read_lane_state_at(node_id, counter),
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .map(|ring| ring.read_lane_state_at(node_id, counter))
                 .unwrap_or(crate::ring::cursor::RingRead::Unavailable),
         }
     }
@@ -331,7 +405,7 @@ impl Fleet {
         }
     }
 
-    /// Clear the ring for `T` and reset its claim head to zero.
+    /// Clear every lane for `T` and reset all heads to zero.
     ///
     /// This is an owner-side boot cleanup primitive. It is safe for
     /// runtime state such as events and periodic metrics when the

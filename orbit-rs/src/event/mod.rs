@@ -5,10 +5,10 @@
 //! is the newest sample for each node?" Event reads ask "which frames
 //! have appeared since my cursor?"
 //!
-//! V0 deliberately uses a single event ring for all topics. The topic is
-//! carried inside the frame payload, so adding a new event type does not
-//! allocate another SHM segment. Typed/domain dispatch belongs above
-//! this raw primitive.
+//! One event SHM segment carries all topics, with one writer lane per fleet
+//! node. The topic is carried inside the frame payload, so adding a new event
+//! type does not allocate another SHM segment. Subscribers keep one cursor per
+//! node lane and do not assume a total order across nodes.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,22 +16,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::fleet::{Fleet, NodeId};
+use crate::fleet::{Fleet, FleetLaneCursor, NodeId};
 use crate::id::NetId64;
-use crate::ring::cursor::RingCursor;
 use crate::{OrbitTyped, RingSpec};
 
 /// Event frame payload limit for V0. This is the event lane's own SHM
 /// payload capacity; non-Unix keeps the same contract so callers do not
 /// accidentally rely on unbounded in-memory frames.
-pub const EVENT_RING_SPEC: RingSpec = RingSpec::new(1024, 256);
+pub const EVENT_RING_SPEC: RingSpec = RingSpec::per_node(1024, 256);
 pub const EVENT_PAYLOAD_MAX: usize = EVENT_RING_SPEC.payload_capacity;
 
 const HEADER_LEN: usize = 2 + 2 + 8;
 const FRAME_KIND_EVENT: u8 = 1;
 pub const EVENT_RING_KIND: u8 = 220;
 
-/// Dedicated single-ring kind for raw Orbit events.
+/// Dedicated per-node-lane ring kind for raw Orbit events.
 #[derive(Clone, Debug)]
 struct OrbitEventRecord;
 
@@ -44,12 +43,11 @@ impl OrbitTyped for OrbitEventRecord {
 
 /// Cursor for one event subscriber.
 ///
-/// The cursor stores the next ring counter the subscriber should try to
-/// read. It is intentionally caller-owned so different consumers can
-/// advance independently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The cursor stores one next counter per node lane. It is intentionally
+/// caller-owned so different consumers can advance independently.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrbitEventCursor {
-    inner: RingCursor,
+    inner: FleetLaneCursor,
 }
 
 impl OrbitEventCursor {
@@ -57,20 +55,20 @@ impl OrbitEventCursor {
     /// available.
     pub const fn from_start() -> Self {
         Self {
-            inner: RingCursor::from_start(),
+            inner: FleetLaneCursor::from_counter(0),
         }
     }
 
     /// Start from a known next counter.
     pub const fn from_counter(next_counter: u64) -> Self {
         Self {
-            inner: RingCursor::from_counter(next_counter),
+            inner: FleetLaneCursor::from_counter(next_counter),
         }
     }
 
-    /// The next counter this cursor will read.
-    pub const fn next_counter(self) -> u64 {
-        self.inner.next_counter()
+    /// The lowest next counter among the node lanes.
+    pub fn next_counter(&self) -> u64 {
+        self.inner.minimum_next_counter()
     }
 }
 
@@ -118,7 +116,7 @@ impl OrbitEventBus {
     /// Useful for subscribers that only want future events.
     pub fn cursor_at_head(&self) -> OrbitEventCursor {
         OrbitEventCursor {
-            inner: self.fleet.cursor_at_head::<OrbitEventRecord>(),
+            inner: self.fleet.lane_cursor_at_head::<OrbitEventRecord>(),
         }
     }
 
@@ -154,7 +152,7 @@ impl OrbitEventBus {
     /// current ring head. If the cursor has fallen behind the ring
     /// capacity, older overwritten counters are reported as `lagged`.
     pub fn poll(&self, cursor: &mut OrbitEventCursor) -> OrbitEventPoll {
-        let ring_poll = self.fleet.poll_ring::<OrbitEventRecord>(&mut cursor.inner);
+        let ring_poll = self.fleet.poll_lanes::<OrbitEventRecord>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
         let mut events = Vec::new();
         for frame in ring_poll.frames {

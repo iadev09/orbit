@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use bytes::Bytes;
-use orbit_rs::{Fleet, NetId64, OrbitTyped, Orbital, RingSpec};
+use orbit_rs::{Fleet, NetId64, NodeId, OrbitTyped, Orbital, RingSpec};
 
 #[test]
 fn empty_fleet_rejected() {
@@ -21,6 +21,18 @@ fn join_single_member_succeeds() {
     assert_eq!(fleet.name(), "test");
     assert_eq!(fleet.fleet_size(), 1);
     assert_eq!(fleet.node_id().get(), 0);
+}
+
+#[test]
+fn node_must_fit_inside_the_declared_fleet() {
+    let err = Fleet::join_as("test", 2, NodeId::new(2)).unwrap_err();
+    assert!(matches!(
+        err,
+        orbit_rs::Error::NodeOutsideFleet {
+            node_id: 2,
+            fleet_size: 2
+        }
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────

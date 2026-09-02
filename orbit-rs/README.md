@@ -51,7 +51,7 @@ Fleet::join_shm(...)
 
 A fleet has a name, a `NodeId`, an expected fleet size, and one ring
 registry. Every `OrbitTyped::KIND` maps to its own ring and declares its
-own `RingSpec { capacity, payload_capacity }`. Role hierarchy
+own `RingSpec { capacity, payload_capacity, topology }`. Role hierarchy
 is outside the crate: master, worker, standalone process, or sibling
 tool can all join the same fleet if the embedder gives them compatible
 configuration.
@@ -64,12 +64,19 @@ On Unix, shared-memory ring names are derived from:
 
 ## Rings
 
-A ring is a fixed-capacity circular append surface. Writers reserve a
-monotonic counter, mint a `NetId64`, and write a frame into:
+A ring is one or more fixed-capacity circular append lanes. Shared rings
+use one multi-writer counter. Per-node rings give every fleet member an
+independent counter and disjoint slots. Frames are written into:
 
 ```text
 counter % capacity
 ```
+
+`PerNode` is a membership contract: only one active process may publish as
+a given `NodeId`. Concurrent tasks inside that process are serialized locally.
+An embedder that replaces a process must fully stop the old incarnation before
+reusing its node id; workloads that genuinely have multiple writers use
+`Shared` topology instead.
 
 The frame shape is:
 
@@ -88,7 +95,8 @@ frame.kind
 ```
 
 Readers must tolerate wraparound. If a reader asks for a counter whose
-slot has already been overwritten, the frame is missing by design.
+slot has already been overwritten, the frame is missing by design. For a
+per-node ring, `capacity` is the retained message count per node lane.
 
 ## Typed Rings
 
@@ -157,7 +165,8 @@ mutation log plus a separate shared arena.
 
 ## Event Bus
 
-`OrbitEventBus` is an append-only event stream over one Orbit ring.
+`OrbitEventBus` is an append-only event stream over one Orbit SHM segment
+with one writer lane per fleet node.
 Events are not cache entries and not metrics snapshots:
 
 ```text
@@ -166,9 +175,10 @@ metrics asks: what is the newest sample for each node/key?
 events  ask: which frames appeared since my cursor?
 ```
 
-All topics deliberately share the same event ring. The topic is carried
+All topics deliberately share the same segment. The topic is carried
 inside the frame payload, so adding a new event type does not allocate
-another shared-memory segment.
+another shared-memory segment. Subscribers keep one cursor per node lane;
+there is no total order across producing nodes.
 
 Each subscriber owns its own cursor. Polling advances that cursor across
 all frames, including frames later filtered out by topic. If a subscriber
@@ -177,7 +187,7 @@ falls behind the fixed ring window, the poll result reports lag.
 ```text
 OrbitEventBus::publish(topic, payload)
   -> topic/payload/timestamp frame
-  -> shared event ring
+  -> publisher's node lane
   -> OrbitEventCursor
   -> poll() / poll_topic()
 ```
@@ -213,10 +223,10 @@ so normal Rust scope becomes the release boundary for successful work.
 
 ## RPC
 
-`rpc::Lane` declares one request ring and one reply ring for an RPC
-domain. Individual request and reply messages are carried as method plus
-payload bytes; they do not implement `OrbitTyped` and do not allocate
-their own SHM segments.
+`rpc::Lane` declares one request segment and one reply segment for an RPC
+domain. Each segment contains one writer lane per fleet node. Individual
+request and reply messages are carried as method plus payload bytes; they
+do not implement `OrbitTyped` and do not allocate their own SHM segments.
 
 `rpc::Client::send(...).await` completes from the reply correlated by
 the request frame's `NetId64` and the addressed node. Orbit does not

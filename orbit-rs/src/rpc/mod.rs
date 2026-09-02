@@ -6,9 +6,9 @@
 //!
 //! Application request and reply types do not implement
 //! [`crate::OrbitTyped`]. A [`Lane`] declares exactly two
-//! physical ring kinds for an RPC domain: one request lane and one reply
-//! lane. Typed codecs and handler registration belong above this raw
-//! byte protocol.
+//! physical ring kinds for an RPC domain: one request segment and one reply
+//! segment. Each segment contains one writer lane per fleet node. Typed codecs
+//! and handler registration belong above this raw byte protocol.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::{Error, Result};
-use crate::ring::cursor::RingCursor;
+use crate::fleet::FleetLaneCursor;
 use crate::{Fleet, NetId64, NodeId, OrbitEpoch, OrbitTyped, RingSpec};
 
 const PROTOCOL_VERSION: u8 = 1;
@@ -52,7 +52,10 @@ impl<L> Clone for RpcRequestRecord<L> {
 
 impl<L: Lane> OrbitTyped for RpcRequestRecord<L> {
     const KIND: u8 = L::REQUEST_RING_KIND;
-    const RING_SPEC: RingSpec = L::REQUEST_RING_SPEC;
+    const RING_SPEC: RingSpec = RingSpec::per_node(
+        L::REQUEST_RING_SPEC.capacity,
+        L::REQUEST_RING_SPEC.payload_capacity,
+    );
 }
 
 struct RpcReplyRecord<L>(PhantomData<L>);
@@ -65,19 +68,22 @@ impl<L> Clone for RpcReplyRecord<L> {
 
 impl<L: Lane> OrbitTyped for RpcReplyRecord<L> {
     const KIND: u8 = L::REPLY_RING_KIND;
-    const RING_SPEC: RingSpec = L::REPLY_RING_SPEC;
+    const RING_SPEC: RingSpec = RingSpec::per_node(
+        L::REPLY_RING_SPEC.capacity,
+        L::REPLY_RING_SPEC.payload_capacity,
+    );
 }
 
 /// Caller-owned position in one RPC request stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestCursor {
-    inner: RingCursor,
+    inner: FleetLaneCursor,
 }
 
 /// Caller-owned position in one RPC reply stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplyCursor {
-    inner: RingCursor,
+    inner: FleetLaneCursor,
 }
 
 /// One decoded RPC request.
@@ -184,28 +190,28 @@ impl<L: Lane> Endpoint<L> {
     /// Start after every request currently retained in the lane.
     pub fn request_cursor_at_head(&self) -> RequestCursor {
         RequestCursor {
-            inner: self.fleet.cursor_at_head::<RpcRequestRecord<L>>(),
+            inner: self.fleet.lane_cursor_at_head::<RpcRequestRecord<L>>(),
         }
     }
 
     /// Replay request history still retained by the ring.
     pub fn request_cursor_from_start(&self) -> RequestCursor {
         RequestCursor {
-            inner: self.fleet.cursor_from_start::<RpcRequestRecord<L>>(),
+            inner: self.fleet.lane_cursor_from_start::<RpcRequestRecord<L>>(),
         }
     }
 
     /// Start after every reply currently retained in the lane.
     pub fn reply_cursor_at_head(&self) -> ReplyCursor {
         ReplyCursor {
-            inner: self.fleet.cursor_at_head::<RpcReplyRecord<L>>(),
+            inner: self.fleet.lane_cursor_at_head::<RpcReplyRecord<L>>(),
         }
     }
 
     /// Replay reply history still retained by the ring.
     pub fn reply_cursor_from_start(&self) -> ReplyCursor {
         ReplyCursor {
-            inner: self.fleet.cursor_from_start::<RpcReplyRecord<L>>(),
+            inner: self.fleet.lane_cursor_from_start::<RpcReplyRecord<L>>(),
         }
     }
 
@@ -266,7 +272,7 @@ impl<L: Lane> Endpoint<L> {
     pub fn poll_requests(&self, cursor: &mut RequestCursor) -> RequestPoll {
         let ring_poll = self
             .fleet
-            .poll_ring::<RpcRequestRecord<L>>(&mut cursor.inner);
+            .poll_lanes::<RpcRequestRecord<L>>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
         let mut requests = Vec::new();
 
@@ -295,9 +301,11 @@ impl<L: Lane> Endpoint<L> {
         RequestPoll { requests, lagged }
     }
 
-    /// Poll every decoded reply in the shared reply lane.
+    /// Poll every decoded reply across the node-owned reply lanes.
     pub fn poll_replies(&self, cursor: &mut ReplyCursor) -> ReplyPoll {
-        let ring_poll = self.fleet.poll_ring::<RpcReplyRecord<L>>(&mut cursor.inner);
+        let ring_poll = self
+            .fleet
+            .poll_lanes::<RpcReplyRecord<L>>(&mut cursor.inner);
         let mut lagged = ring_poll.loss.total();
         let mut replies = Vec::new();
 

@@ -10,8 +10,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use orbit_rs::{Fleet, NetId64};
-pub use orbit_rs::{OrbitTyped, RingSpec};
+use orbit_rs::{Fleet, NetId64, NodeId};
+pub use orbit_rs::{OrbitTyped, RingSpec, RingTopology};
 
 /// Default ring capacity for one current snapshot per fleet node.
 ///
@@ -166,6 +166,9 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
     /// for each node. Malformed frames are ignored; a newer valid frame
     /// for a node wins because the walk starts at the ring head.
     pub fn latest_by_node(&self) -> HashMap<u16, OrbitMetricSample<T>> {
+        if T::RING_SPEC.topology == RingTopology::PerNode {
+            return self.latest_by_node_lanes();
+        }
         let head = self.family.fleet.head::<T>();
         if head == 0 {
             return HashMap::new();
@@ -214,6 +217,9 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
         T: OrbitMetricKeyedSnapshot<Key = K>,
         K: Eq + Hash,
     {
+        if T::RING_SPEC.topology == RingTopology::PerNode {
+            return self.latest_by_key_lanes();
+        }
         let head = self.family.fleet.head::<T>();
         if head == 0 {
             return HashMap::new();
@@ -251,6 +257,81 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
         samples
     }
 
+    fn latest_by_node_lanes(&self) -> HashMap<u16, OrbitMetricSample<T>> {
+        let capacity = self.family.fleet.ring_capacity::<T>() as u64;
+        let mut samples = HashMap::new();
+
+        for node in 0..self.family.fleet.fleet_size() {
+            let node_id = NodeId::new(u16::from(node));
+            let head = self.family.fleet.lane_head::<T>(node_id);
+            let walk_count = head.min(capacity);
+            for offset in 0..walk_count {
+                let counter = head - 1 - offset;
+                let Some(frame) = self.family.fleet.read_lane_at::<T>(node_id, counter) else {
+                    continue;
+                };
+                let Ok(snapshot) = T::decode(&frame.payload) else {
+                    continue;
+                };
+                if snapshot.node_id() != u16::from(node) {
+                    continue;
+                }
+                samples.insert(
+                    snapshot.node_id(),
+                    OrbitMetricSample {
+                        id: frame.id,
+                        snapshot,
+                    },
+                );
+                break;
+            }
+        }
+
+        samples
+    }
+
+    fn latest_by_key_lanes<K>(&self) -> HashMap<K, OrbitMetricSample<T>>
+    where
+        T: OrbitMetricKeyedSnapshot<Key = K>,
+        K: Eq + Hash,
+    {
+        let capacity = self.family.fleet.ring_capacity::<T>() as u64;
+        let mut samples = HashMap::new();
+
+        for node in 0..self.family.fleet.fleet_size() {
+            let node_id = NodeId::new(u16::from(node));
+            let head = self.family.fleet.lane_head::<T>(node_id);
+            let walk_count = head.min(capacity);
+            for offset in 0..walk_count {
+                let counter = head - 1 - offset;
+                let Some(frame) = self.family.fleet.read_lane_at::<T>(node_id, counter) else {
+                    continue;
+                };
+                let Ok(snapshot) = T::decode(&frame.payload) else {
+                    continue;
+                };
+                let key = snapshot.metric_key();
+                let candidate = OrbitMetricSample {
+                    id: frame.id,
+                    snapshot,
+                };
+                match samples.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(candidate);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry)
+                        if sample_is_newer(&candidate, entry.get()) =>
+                    {
+                        entry.insert(candidate);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {}
+                }
+            }
+        }
+
+        samples
+    }
+
     /// Return latest keyed samples whose captured timestamp is within
     /// `max_age_secs` of `now_unix_secs`.
     pub fn fresh_by_key<K>(
@@ -280,6 +361,21 @@ impl<T: OrbitMetricSnapshot> OrbitMetricCollector<T> {
             .filter(|(_, sample)| sample.is_fresh(now_unix_secs, max_age_secs))
             .collect()
     }
+}
+
+fn sample_is_newer<T: OrbitMetricSnapshot>(
+    candidate: &OrbitMetricSample<T>,
+    current: &OrbitMetricSample<T>,
+) -> bool {
+    (
+        candidate.captured_at_unix_secs(),
+        candidate.id.node(),
+        candidate.id.counter(),
+    ) > (
+        current.captured_at_unix_secs(),
+        current.id.node(),
+        current.id.counter(),
+    )
 }
 
 #[cfg(test)]
@@ -365,6 +461,82 @@ mod tests {
         assert_eq!(latest.len(), 2);
         assert_eq!(latest[&1].snapshot.value, 101);
         assert_eq!(latest[&2].snapshot.value, 200);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn per_node_family_reads_each_writer_lane() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct PerNodeSnapshot(TestSnapshot);
+
+        impl OrbitTyped for PerNodeSnapshot {
+            const KIND: u8 = 209;
+            const RING_SPEC: RingSpec = RingSpec::per_node(16, 18);
+        }
+
+        impl OrbitMetricSnapshot for PerNodeSnapshot {
+            const FAMILY: &'static str = "per-node-test";
+
+            fn node_id(&self) -> u16 {
+                self.0.node_id()
+            }
+
+            fn captured_at_unix_secs(&self) -> u64 {
+                self.0.captured_at_unix_secs()
+            }
+
+            fn encode(&self) -> Result<Vec<u8>, String> {
+                self.0.encode()
+            }
+
+            fn decode(bytes: &[u8]) -> Result<Self, String> {
+                TestSnapshot::decode(bytes).map(Self)
+            }
+        }
+
+        let name = Box::leak(format!("m{:x}", std::process::id()).into_boxed_str());
+        let collector_fleet = Arc::new(Fleet::join_shm_as(name, 3, NodeId::new(0)).unwrap());
+        collector_fleet.reset_ring::<PerNodeSnapshot>().unwrap();
+        let node_one = OrbitMetricPublisher::<PerNodeSnapshot>::new(Arc::new(
+            Fleet::join_shm_as(name, 3, NodeId::new(1)).unwrap(),
+        ));
+        let node_two = OrbitMetricPublisher::<PerNodeSnapshot>::new(Arc::new(
+            Fleet::join_shm_as(name, 3, NodeId::new(2)).unwrap(),
+        ));
+
+        node_one
+            .publish(&PerNodeSnapshot(TestSnapshot {
+                node: 1,
+                captured_at: 10,
+                value: 100,
+            }))
+            .unwrap();
+        node_two
+            .publish(&PerNodeSnapshot(TestSnapshot {
+                node: 2,
+                captured_at: 11,
+                value: 200,
+            }))
+            .unwrap();
+        node_one
+            .publish(&PerNodeSnapshot(TestSnapshot {
+                node: 1,
+                captured_at: 12,
+                value: 101,
+            }))
+            .unwrap();
+
+        let latest =
+            OrbitMetricCollector::<PerNodeSnapshot>::new(collector_fleet.clone()).latest_by_node();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[&1].snapshot.0.value, 101);
+        assert_eq!(latest[&2].snapshot.0.value, 200);
+
+        collector_fleet
+            .shm_ring::<PerNodeSnapshot>()
+            .unwrap()
+            .unlink()
+            .unwrap();
     }
 
     #[test]

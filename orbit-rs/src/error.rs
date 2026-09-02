@@ -13,6 +13,9 @@ pub enum Error {
     /// Fleet size cannot be zero — Orbit's plurality requirement (see VISION §2).
     EmptyFleet,
 
+    /// A node id must address one of the fleet's declared member slots.
+    NodeOutsideFleet { node_id: u16, fleet_size: u8 },
+
     /// A cache frame could not fit into the current ring payload.
     CacheFrameTooLarge {
         key_len: usize,
@@ -55,6 +58,10 @@ impl fmt::Display for Error {
             Self::EmptyFleet => {
                 write!(f, "fleet_size must be ≥ 1; Orbit needs at least one member")
             }
+            Self::NodeOutsideFleet {
+                node_id,
+                fleet_size,
+            } => write!(f, "node_id {node_id} is outside fleet_size {fleet_size}"),
             Self::CacheFrameTooLarge {
                 key_len,
                 value_len,

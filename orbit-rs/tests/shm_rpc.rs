@@ -61,11 +61,20 @@ fn cleanup(name: &str) {
     for (kind, spec) in [
         (
             TestRpcLane::REQUEST_RING_KIND,
-            TestRpcLane::REQUEST_RING_SPEC,
+            RingSpec::per_node(
+                TestRpcLane::REQUEST_RING_SPEC.capacity,
+                TestRpcLane::REQUEST_RING_SPEC.payload_capacity,
+            ),
         ),
-        (TestRpcLane::REPLY_RING_KIND, TestRpcLane::REPLY_RING_SPEC),
+        (
+            TestRpcLane::REPLY_RING_KIND,
+            RingSpec::per_node(
+                TestRpcLane::REPLY_RING_SPEC.capacity,
+                TestRpcLane::REPLY_RING_SPEC.payload_capacity,
+            ),
+        ),
     ] {
-        if let Ok(ring) = ShmRing::open_or_create(name, kind, spec) {
+        if let Ok(ring) = ShmRing::open_or_create_for_fleet(name, kind, spec, 3) {
             let _ = ring.unlink();
         }
     }

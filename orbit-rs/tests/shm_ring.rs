@@ -9,7 +9,7 @@
 #![cfg(unix)]
 
 use bytes::Bytes;
-use orbit_rs::ring_shm::{ShmRing, segment_size_for_spec};
+use orbit_rs::ring_shm::{ShmRing, segment_size_for_spec, segment_size_for_spec_and_fleet};
 use orbit_rs::{NodeId, RingSpec};
 
 /// macOS limits POSIX SHM names to PSHMNAMLEN (31 chars). Keep
@@ -148,8 +148,15 @@ fn segment_size_uses_the_ring_payload_capacity() {
     let small = segment_size_for_spec(RingSpec::new(4, 16)).unwrap();
     let large = segment_size_for_spec(RingSpec::new(4, 256)).unwrap();
 
-    assert_eq!(small, 64 + 4 * 64);
-    assert_eq!(large, 64 + 4 * 320);
+    assert_eq!(small, 64 + 64 + 4 * 64);
+    assert_eq!(large, 64 + 64 + 4 * 320);
+}
+
+#[test]
+fn per_node_segment_size_multiplies_the_lane_storage() {
+    let size = segment_size_for_spec_and_fleet(RingSpec::per_node(4, 16), 3).unwrap();
+
+    assert_eq!(size, 64 + 3 * 64 + 3 * 4 * 64);
 }
 
 #[test]
