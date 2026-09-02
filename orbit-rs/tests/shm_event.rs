@@ -9,11 +9,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::os::unix::net::UnixStream;
 
 use nix::sys::wait::{WaitStatus, waitpid};
@@ -63,7 +63,7 @@ fn cleanup_event_ring(name: &str) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn wait_until_readable(fd: &impl AsRawFd) -> bool {
     let mut poll_fd = libc::pollfd {
         fd: fd.as_raw_fd(),
@@ -163,7 +163,7 @@ fn parent_publishes_child_polls_event() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn cross_process_publish_wakes_process_local_event_fd() {
     let name = fresh_name();
@@ -223,7 +223,7 @@ fn cross_process_publish_wakes_process_local_event_fd() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn one_publish_wakes_each_process_local_event_fd() {
     let name = fresh_name();

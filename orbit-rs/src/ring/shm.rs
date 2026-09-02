@@ -85,7 +85,7 @@ struct ShmRingHeader {
     kind: u8,
     topology: u8,
     lane_count: u16,
-    /// Linux futex word used by notification-enabled ring users.
+    /// Shared futex/umtx word used by notification-enabled ring users.
     /// It lives in the existing reserved header space, so the V3
     /// layout remains compatible with already-created segments.
     notification_generation: AtomicU32,
@@ -430,7 +430,7 @@ impl ShmRing {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(crate) fn notification_generation(&self) -> &AtomicU32 {
         // SAFETY: the mapped header was initialized before this ring handle
         // was returned and remains mapped for the lifetime of `self`.

@@ -59,7 +59,7 @@ pub use event::{
 pub use fleet::{Fleet, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
 pub use orbital::Orbital;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use ring::RingEventFd;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};
 pub use ring::{Frame, Ring, RingSpec, RingTopology};

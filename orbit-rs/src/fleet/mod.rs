@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use crate::OrbitTyped;
 use crate::error::{Error, Result};
 use crate::id::NetId64;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use crate::ring::RingEventFd;
 #[cfg(unix)]
 use crate::ring::shm::{ShmRing, ShmRingRegistry};
@@ -429,7 +429,7 @@ impl Fleet {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(crate) fn ring_event_fd<T: OrbitTyped>(&self) -> std::io::Result<RingEventFd> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => RingEventFd::new(rings.get_or_create_for::<T>()?),
@@ -440,7 +440,7 @@ impl Fleet {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(crate) fn publish_notified<T: OrbitTyped>(
         &self,
         frame_kind: u8,

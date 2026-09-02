@@ -1,11 +1,12 @@
-//! Linux notification bridge for an SHM ring.
+//! Native notification bridge for an SHM ring.
 //!
-//! The shared signal is a futex generation in the ring header. Each process
-//! owns a private `eventfd` and a small blocking driver thread that converts
-//! generation changes into fd readiness. Async runtimes can therefore wait on
-//! their normal reactor without sharing one drainable eventfd across readers.
+//! The shared signal is a generation in the ring header, waited through Linux
+//! futex or FreeBSD umtx. Each process owns a private `eventfd` and a small
+//! blocking driver thread that converts generation changes into fd readiness.
+//! Async runtimes can therefore wait on their normal reactor without sharing
+//! one drainable eventfd across readers.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "freebsd"))]
 
 use std::fmt;
 use std::io;
@@ -19,9 +20,9 @@ use super::shm::ShmRing;
 /// Process-local fd readiness bridge for one shared Orbit ring.
 ///
 /// Every subscribing process creates its own instance. Ring publishers bump a
-/// generation stored in SHM and wake all futex waiters; the local driver then
-/// marks this fd readable. Multiple publishes may coalesce into one wake, so a
-/// consumer must drain the fd and poll the ring through its own cursor.
+/// generation stored in SHM and wake all platform waiters; the local driver
+/// then marks this fd readable. Multiple publishes may coalesce into one wake,
+/// so a consumer must drain the fd and poll the ring through its own cursor.
 pub struct RingEventFd {
     fd: OwnedFd,
     ring: Arc<ShmRing>,
@@ -57,7 +58,8 @@ impl RingEventFd {
                         continue;
                     }
 
-                    if futex_wait(driver_ring.notification_generation(), observed).is_err() {
+                    if wait_for_generation(driver_ring.notification_generation(), observed).is_err()
+                    {
                         break;
                     }
                 }
@@ -74,7 +76,7 @@ impl RingEventFd {
     pub(crate) fn notify(ring: &ShmRing) -> io::Result<()> {
         ring.notification_generation()
             .fetch_add(1, Ordering::Release);
-        futex_wake_all(ring.notification_generation())
+        wake_all_generation_waiters(ring.notification_generation())
     }
 
     /// Drain all coalesced wake counts from this non-blocking eventfd.
@@ -142,20 +144,21 @@ impl fmt::Debug for RingEventFd {
 impl Drop for RingEventFd {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        // Change the futex value before waking. If the driver passed its stop
-        // check but has not entered FUTEX_WAIT yet, the compare then fails
-        // with EAGAIN instead of parking after our wake and deadlocking join.
+        // Change the generation before waking. If the driver passed its stop
+        // check but has not entered the platform wait yet, the atomic compare
+        // prevents it from parking after our wake and deadlocking join.
         self.ring
             .notification_generation()
             .fetch_add(1, Ordering::Release);
-        let _ = futex_wake_all(self.ring.notification_generation());
+        let _ = wake_all_generation_waiters(self.ring.notification_generation());
         if let Some(driver) = self.driver.take() {
             let _ = driver.join();
         }
     }
 }
 
-fn futex_wait(word: &AtomicU32, expected: u32) -> io::Result<()> {
+#[cfg(target_os = "linux")]
+fn wait_for_generation(word: &AtomicU32, expected: u32) -> io::Result<()> {
     let result = unsafe {
         libc::syscall(
             libc::SYS_futex,
@@ -180,7 +183,8 @@ fn futex_wait(word: &AtomicU32, expected: u32) -> io::Result<()> {
     }
 }
 
-fn futex_wake_all(word: &AtomicU32) -> io::Result<()> {
+#[cfg(target_os = "linux")]
+fn wake_all_generation_waiters(word: &AtomicU32) -> io::Result<()> {
     let result = unsafe {
         libc::syscall(
             libc::SYS_futex,
@@ -193,6 +197,48 @@ fn futex_wake_all(word: &AtomicU32) -> io::Result<()> {
         )
     };
     if result >= 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn wait_for_generation(word: &AtomicU32, expected: u32) -> io::Result<()> {
+    let result = unsafe {
+        libc::_umtx_op(
+            word.as_ptr().cast(),
+            libc::UMTX_OP_WAIT_UINT,
+            expected as libc::c_ulong,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        // The generation changed before the kernel parked us, or the driver
+        // was interrupted. The outer loop re-checks generation and stop.
+        Some(libc::EINTR) => Ok(()),
+        _ => Err(error),
+    }
+}
+
+#[cfg(target_os = "freebsd")]
+fn wake_all_generation_waiters(word: &AtomicU32) -> io::Result<()> {
+    let result = unsafe {
+        libc::_umtx_op(
+            word.as_ptr().cast(),
+            libc::UMTX_OP_WAKE,
+            i32::MAX as libc::c_ulong,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

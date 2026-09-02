@@ -56,12 +56,12 @@ use crate::OrbitTyped;
 use crate::id::NetId64;
 
 pub mod cursor;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod event_fd;
 #[cfg(unix)]
 pub mod shm;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use event_fd::RingEventFd;
 
 /// Writer ownership for one [`OrbitTyped`] ring.
