@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use orbit_rs::{OrbitTyped, RingSpec, RingTopology};
 
-pub const CACHE_MUTATION_RING_KIND: u8 = 225;
-pub const CACHE_PAYLOAD_RING_KIND: u8 = 226;
+pub const CACHE_MUTATION_RING_KIND: u8 = 200;
+pub const CACHE_PAYLOAD_RING_KIND: u8 = 201;
 pub const CACHE_MUTATION_RING_SPEC: RingSpec = RingSpec::per_node(1_024, 1_024);
 pub const CACHE_PAYLOAD_RING_SPEC: RingSpec = RingSpec::per_node(1_024, 4_096);
 

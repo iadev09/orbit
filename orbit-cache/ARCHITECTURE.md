@@ -117,6 +117,11 @@ belong above it.
 per-node payload lane. Applications with a different memory or burst budget
 may define another layout, but every fleet peer must use the same layout.
 
+The default wire allocation reserves kind `200` for mutations and kind `201`
+for payload chunks. Embedders that compose Orbit with a different fleet-wide
+kind registry may provide another `CacheLayout`; every process in that fleet
+must use the same allocation.
+
 Values may span consecutive payload slots. Orbit's batch publish primitive
 holds one lane reservation across all chunks and exposes the new lane head
 only after the complete batch commits. A value larger than the entire payload

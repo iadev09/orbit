@@ -111,8 +111,10 @@ the replacement frame as though it were the requested value.
 | Resource | Default |
 | --- | ---: |
 | Local L1 | 10,000 entries per process |
+| Mutation ring kind | 200 |
 | Mutation retention | 1,024 frames per node lane |
 | Mutation slot payload | 1,024 bytes |
+| Payload ring kind | 201 |
 | Payload retention | 1,024 frames per node lane |
 | Payload slot bytes | 4,096 bytes |
 | Maximum key | 985 bytes |
