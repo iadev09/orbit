@@ -8,4 +8,4 @@ smoke:
     test "$(uname -s)" = "Linux"
     rustc --version
     cargo --version
-    cargo test --locked -p orbit-rs --all-targets
+    cargo test -p orbit-rs --all-targets
