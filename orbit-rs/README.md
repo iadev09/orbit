@@ -226,6 +226,14 @@ docker build --platform linux/arm64 -t orbit-rs-linux-arm64 .
 docker run --rm --platform linux/arm64 orbit-rs-linux-arm64
 ```
 
+On an existing native Linux checkout, the same smoke suite is available as:
+
+```sh
+just smoke
+```
+
+The Gitea Actions workflow runs this recipe on every push.
+
 Typed dispatch, application lifecycle hooks, acknowledgements, durable
 replay, and consumer groups belong above this primitive.
 
