@@ -3,22 +3,22 @@
 //! A lease alone cannot protect a shared resource: a holder can stall past
 //! its TTL, lose the tenure to a new holder, then resume and write stale
 //! data. A fencing token closes that gap. Every tenure carries a
-//! monotonically non-decreasing token ([`crate::contest::Guard::fence_token`]);
+//! monotonically non-decreasing token
+//! ([`crate::contest::guard::Guard::fence_token`]);
 //! the protected resource records the highest token it has honored and
 //! rejects any write carrying a lower one, so a superseded holder that wakes
 //! up late is fenced out even if mutual exclusion momentarily slipped.
 //!
-//! The token is the per-ring claim counter. Successive winners always carry
-//! a strictly higher counter (a new winner's claim is published after the
-//! previous winner's), so the fence is sound. The 40-bit ring counter is the
-//! horizon; see FINDINGS "CONTEST (claude ultra)".
+//! The token is the Contest table's fleet-wide claim counter. Successive
+//! winners always carry a strictly higher counter, so the fence is sound.
+//! The 40-bit `NetId64` counter is the runtime horizon.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A monotonic fencing token identifying one contest tenure.
 ///
-/// Obtain it from [`crate::contest::Guard::fence_token`] and pass it with
+/// Obtain it from [`crate::contest::guard::Guard::fence_token`] and pass it with
 /// every write to the protected resource. Reconstruct one from a persisted
 /// `u64` with [`FenceToken::new`] when the resource keeps its high-water
 /// mark across restarts.

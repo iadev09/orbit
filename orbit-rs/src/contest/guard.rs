@@ -1,54 +1,27 @@
-//! Contest coordination over one Orbit ring.
+//! Contest coordination over one fleet-shared current-state table.
 //!
 //! `Contest` is not a race primitive. It turns simultaneous interest in
 //! the same typed subject into a small Claim/Yield protocol: every peer
-//! may publish a claim, the earliest active claim receives a
-//! drop-released [`Guard`], and later claims receive `YieldTo(holder)`.
+//! may attempt a claim, the active claimant receives a drop-released
+//! [`Guard`], and later claimants receive `YieldTo(holder)`.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bytes::{BufMut, Bytes, BytesMut};
-
-use crate::OrbitTyped;
-use crate::RingSpec;
 use crate::contest::fence::FenceToken;
-use crate::error::{Error, Result};
+pub use crate::contest::state::{
+    CONTEST_STATE_CAPACITY, CONTEST_STATE_KIND, CONTEST_STATE_PAYLOAD_MAX,
+};
+use crate::contest::state::{LeaseState, StateClaim};
+use crate::error::Result;
 use crate::fleet::Fleet;
 use crate::id::NetId64;
-use crate::ring::cursor::{RingCursor, RingLoss};
-
-/// Contest frame payload limit for V0. On Unix this matches the SHM ring
-/// slot payload size; non-Unix keeps the same bounded contract.
-pub const CONTEST_RING_SPEC: RingSpec = RingSpec::shared_ordered(1024, 256);
-pub const CONTEST_PAYLOAD_MAX: usize = CONTEST_RING_SPEC.payload_capacity;
-
-pub const CONTEST_RING_KIND: u8 = 222;
-pub const CONTEST_FRAME_KIND_CLAIM: u8 = 1;
-pub const CONTEST_FRAME_KIND_RELEASE: u8 = 2;
-pub const CONTEST_FRAME_KIND_RENEW: u8 = 3;
-
-const CLAIM_HEADER_LEN: usize = 1 + 2 + 2 + 8 + 8;
-const RELEASE_HEADER_LEN: usize = 8 + 1 + 2;
-const RENEW_HEADER_LEN: usize = 8 + 8 + 1 + 2;
-
-/// Dedicated ring record marker for contest frames.
-#[derive(Clone, Debug)]
-pub struct ContestRecord;
-
-impl OrbitTyped for ContestRecord {
-    // Hand-picked V0 kind. Build-time KIND allocation will replace
-    // these manual values later.
-    const KIND: u8 = CONTEST_RING_KIND;
-    const RING_SPEC: RingSpec = CONTEST_RING_SPEC;
-}
 
 /// Type namespace for a contest subject.
 ///
-/// This is deliberately smaller than [`OrbitTyped`]. A contest subject is
+/// This is deliberately smaller than [`crate::OrbitTyped`]. A contest subject is
 /// not a ring value family; it is just a caller-owned namespace inside
-/// the shared contest ring.
+/// the shared contest table.
 pub trait ContestType {
     const KIND: u8;
 }
@@ -99,12 +72,24 @@ impl Contest {
         Self { fleet }
     }
 
-    /// Clear the shared contest ring.
+    /// Clear the shared contest state table.
     ///
     /// Intended for owner-controlled boot-time cleanup before peer
     /// processes publish claims. It is not a runtime coordination tool.
+    pub fn reset(&self) -> Result<()> {
+        self.fleet.contest_state().reset()
+    }
+
+    /// Compatibility name for the old ring-backed implementation.
     pub fn reset_ring(&self) -> Result<()> {
-        self.fleet.reset_ring::<ContestRecord>().map_err(Error::Io)
+        self.reset()
+    }
+
+    /// Remove the POSIX SHM state object and its companion lock file.
+    /// Existing mappings stay valid until their processes detach.
+    #[cfg(unix)]
+    pub fn unlink(&self) -> Result<()> {
+        self.fleet.contest_state().unlink()
     }
 
     /// Try to become the first active claimant for a typed subject.
@@ -153,62 +138,21 @@ impl Contest {
     ) -> Result<Claim> {
         let owner = owner.into();
         let expires_at_ms = expires_at(now_ms, ttl);
-        let payload = encode_claim(
+        let claim = self.fleet.contest_state().claim(
+            self.fleet.node_id(),
             subject.kind,
             subject.as_bytes(),
             owner.as_bytes(),
             now_ms,
             expires_at_ms,
         )?;
-        let claim_id =
-            self.fleet
-                .publish::<ContestRecord>(CONTEST_FRAME_KIND_CLAIM, now_ms, payload);
-
-        // SharedOrdered publishes the head only after each slot commits, so
-        // every counter below the observed head must be readable. The global
-        // counter is therefore the complete claim order, even across writers.
-        //
-        // - A strictly-earlier *visible* claim -> yield (any loss is moot:
-        //   we lose regardless).
-        // - We are the earliest visible claim on a clean window -> Claimed.
-        // - An unavailable committed counter means the resident snapshot could
-        //   not be reconstructed (for example, concurrent traffic wrapped a
-        //   slot while it was scanned). Fail closed instead of guessing that
-        //   an earlier claim did not exist.
-        //
-        // `poll_active` scans only the resident window from its floor, so normal
-        // history aging is never mistaken for loss. A live claim pushed out of
-        // the capacity-sized window by extreme write volume is a documented
-        // limit, backed by fencing tokens ([`crate::contest::fence`]) at the
-        // protected resource.
-        let (earliest, loss) = self.poll_active(&subject, now_ms);
-        if let Some(holder) = earliest
-            .as_ref()
-            .filter(|holder| holder.claim_id.counter() != claim_id.counter())
-        {
-            let _ = self.release_id(&subject, claim_id, now_ms);
-            return Ok(Claim::YieldTo(holder.clone()));
-        }
-        if loss.unavailable > 0 {
-            let _ = self.release_id(&subject, claim_id, now_ms);
-            return Err(Error::ContestRingUnavailable {
-                unavailable: loss.unavailable,
-            });
-        }
-
-        match earliest {
-            Some(holder) => Ok(Claim::Claimed(Guard::new(self.clone(), holder))),
-            None => {
-                // Subject is free but our own claim is not observable
-                // (e.g. ttl == 0 born-expired). Preserve the prior
-                // YieldTo(self) contract for that degenerate case.
-                Ok(Claim::YieldTo(Holder {
-                    claim_id,
-                    subject: subject.clone(),
-                    owner: owner.clone(),
-                    claimed_at_ms: now_ms,
-                    expires_at_ms,
-                }))
+        match claim {
+            StateClaim::Claimed(holder) => Ok(Claim::Claimed(Guard::new(
+                self.clone(),
+                holder_from_state(holder),
+            ))),
+            StateClaim::Occupied(holder) | StateClaim::BornExpired(holder) => {
+                Ok(Claim::YieldTo(holder_from_state(holder)))
             }
         }
     }
@@ -236,12 +180,12 @@ impl Contest {
         &self,
         subject: &ContestSubject,
         claim_id: NetId64,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<NetId64> {
-        let payload = encode_release(subject.kind, subject.as_bytes(), claim_id)?;
-        Ok(self
-            .fleet
-            .publish::<ContestRecord>(CONTEST_FRAME_KIND_RELEASE, now_ms, payload))
+        self.fleet
+            .contest_state()
+            .release(subject.kind, subject.as_bytes(), claim_id)?;
+        Ok(claim_id)
     }
 
     fn renew_id(
@@ -250,88 +194,24 @@ impl Contest {
         claim_id: NetId64,
         expires_at_ms: u64,
         now_ms: u64,
-    ) -> Result<NetId64> {
-        let payload = encode_renew(subject.kind, subject.as_bytes(), claim_id, expires_at_ms)?;
-        Ok(self
-            .fleet
-            .publish::<ContestRecord>(CONTEST_FRAME_KIND_RENEW, now_ms, payload))
+    ) -> Result<LeaseState> {
+        self.fleet.contest_state().renew(
+            subject.kind,
+            subject.as_bytes(),
+            claim_id,
+            expires_at_ms,
+            now_ms,
+        )
     }
+}
 
-    /// Reconstruct the earliest active claim for `subject` from the ring,
-    /// together with any window loss observed during the walk.
-    ///
-    /// The loss is load-bearing: a caller must not treat "no holder found"
-    /// as "subject free" when frames that could carry an earlier claim were
-    /// overwritten or became unavailable while the committed window was
-    /// scanned.
-    fn poll_active(&self, subject: &ContestSubject, now_ms: u64) -> (Option<Holder>, RingLoss) {
-        // Scan only the resident window, starting at its floor (head -
-        // capacity). Starting from counter 0 would make `poll_ring` report the
-        // entire scrolled-out history as `overwritten` — that is normal ring
-        // aging, NOT a lost-frame signal, and on a mature ring it is always
-        // non-zero, so it must never be treated as a loss. From the floor,
-        // `overwritten` is structurally 0. `unavailable` means the committed
-        // resident window could not be reconstructed, commonly because enough
-        // concurrent traffic wrapped a slot while this scan was in progress.
-        let head = self.fleet.head::<ContestRecord>();
-        let capacity = self.fleet.ring_capacity::<ContestRecord>() as u64;
-        let mut cursor = RingCursor::from_counter(head.saturating_sub(capacity));
-        let poll = self.fleet.poll_ring::<ContestRecord>(&mut cursor);
-        let loss = RingLoss {
-            overwritten: 0,
-            unavailable: poll.loss.unavailable,
-        };
-        let mut active = BTreeMap::<u64, Holder>::new();
-
-        for frame in poll.frames {
-            match decode_frame(frame.kind, &frame.payload) {
-                Some(DecodedContestFrame::Claim(decoded))
-                    if decoded.subject_kind == subject.kind
-                        && decoded.subject == subject.as_bytes() =>
-                {
-                    active.insert(
-                        frame.id.counter(),
-                        Holder {
-                            claim_id: frame.id,
-                            subject: ContestSubject::from_parts(
-                                decoded.subject_kind,
-                                decoded.subject,
-                            ),
-                            owner: ContestOwner::from_bytes(decoded.owner),
-                            claimed_at_ms: decoded.claimed_at_ms,
-                            expires_at_ms: decoded.expires_at_ms,
-                        },
-                    );
-                }
-                Some(DecodedContestFrame::Renew(decoded))
-                    if decoded.subject_kind == subject.kind
-                        && decoded.subject == subject.as_bytes() =>
-                {
-                    // Extend the existing tenure in place — same counter, so
-                    // the holder keeps its earliest-claim position. A renewal
-                    // whose original CLAIM has already scrolled out of the
-                    // capacity-sized window is unreconstructable here (the
-                    // documented eviction limit); with a large window this does
-                    // not arise for a tenure renewing within its TTL.
-                    if let Some(holder) = active.get_mut(&decoded.claim_id.counter()) {
-                        holder.expires_at_ms = holder.expires_at_ms.max(decoded.expires_at_ms);
-                    }
-                }
-                Some(DecodedContestFrame::Release(decoded))
-                    if decoded.subject_kind == subject.kind
-                        && decoded.subject == subject.as_bytes() =>
-                {
-                    active.remove(&decoded.claim_id.counter());
-                }
-                _ => {}
-            }
-        }
-
-        // Expiry is evaluated after renewals, so a renewed lease that
-        // outlived its original TTL is not dropped.
-        active.retain(|_, holder| holder.expires_at_ms > now_ms);
-
-        (active.into_values().next(), loss)
+fn holder_from_state(holder: LeaseState) -> Holder {
+    Holder {
+        claim_id: holder.claim_id,
+        subject: ContestSubject::from_parts(holder.subject_kind, &holder.subject),
+        owner: ContestOwner::from_bytes(&holder.owner),
+        claimed_at_ms: holder.claimed_at_ms,
+        expires_at_ms: holder.expires_at_ms,
     }
 }
 
@@ -389,8 +269,8 @@ pub struct Holder {
 ///
 /// The guard is the lifetime of the claim in Rust terms: while it lives,
 /// the caller is carrying the responsibility for the contest subject.
-/// Dropping it publishes a release frame. If the process is killed before
-/// `Drop` runs, the claim remains active only until its encoded expiry.
+/// Dropping it clears the matching state-table entry. If the process is killed
+/// before `Drop` runs, the claim remains active only until its encoded expiry.
 #[derive(Debug)]
 pub struct Guard {
     contest: Contest,
@@ -420,7 +300,7 @@ impl Guard {
     /// [`crate::contest::fence::Fence`]: a stalled holder that resumes after
     /// its lease expired carries a lower token and is rejected, keeping the
     /// resource safe even if mutual exclusion momentarily slipped. The token
-    /// is the per-ring claim counter — strictly higher for each successive
+    /// is the fleet-wide claim counter — strictly higher for each successive
     /// winner — so it is the transient tenure's identity, not a rank.
     pub fn fence_token(&self) -> FenceToken {
         FenceToken::new(self.holder.claim_id.counter())
@@ -439,11 +319,10 @@ impl Guard {
     }
 
     /// Extend this tenure's lease by `ttl` from now, without minting a new
-    /// claim — the holder keeps its earliest-claim position. Publishes a
-    /// renewal frame and advances the in-memory expiry. Call before the
-    /// current lease elapses (e.g. at `ttl/3`) when work outlives one TTL,
-    /// so a live holder is not revoked mid-flight. Renewal only extends the
-    /// current tenure; it never accumulates rank.
+    /// claim — the holder keeps the same claim id and fencing token. The
+    /// current state-table entry is updated in place. Call before the current
+    /// lease elapses (e.g. at `ttl/3`) when work outlives one TTL. Renewal
+    /// only extends the current tenure; it never accumulates rank.
     pub fn renew(&mut self, ttl: Duration) -> Result<NetId64> {
         self.renew_at(ttl, now_ms())
     }
@@ -452,14 +331,14 @@ impl Guard {
     /// embedders with their own time source.
     pub fn renew_at(&mut self, ttl: Duration, now_ms: u64) -> Result<NetId64> {
         let expires_at_ms = expires_at(now_ms, ttl);
-        let id = self.contest.renew_id(
+        let renewed = self.contest.renew_id(
             &self.holder.subject,
             self.holder.claim_id,
             expires_at_ms,
             now_ms,
         )?;
-        self.holder.expires_at_ms = expires_at_ms;
-        Ok(id)
+        self.holder.expires_at_ms = renewed.expires_at_ms;
+        Ok(renewed.claim_id)
     }
 
     /// Explicitly release the claim before this guard leaves scope.
@@ -504,184 +383,6 @@ impl Claim {
     pub fn is_claimed(&self) -> bool {
         matches!(self, Self::Claimed(_))
     }
-}
-
-struct DecodedClaim<'a> {
-    subject_kind: u8,
-    subject: &'a [u8],
-    owner: &'a [u8],
-    claimed_at_ms: u64,
-    expires_at_ms: u64,
-}
-
-struct DecodedRelease<'a> {
-    subject_kind: u8,
-    subject: &'a [u8],
-    claim_id: NetId64,
-}
-
-struct DecodedRenew<'a> {
-    subject_kind: u8,
-    subject: &'a [u8],
-    claim_id: NetId64,
-    expires_at_ms: u64,
-}
-
-enum DecodedContestFrame<'a> {
-    Claim(DecodedClaim<'a>),
-    Release(DecodedRelease<'a>),
-    Renew(DecodedRenew<'a>),
-}
-
-fn encode_claim(
-    subject_kind: u8,
-    subject: &[u8],
-    owner: &[u8],
-    claimed_at_ms: u64,
-    expires_at_ms: u64,
-) -> Result<Bytes> {
-    let total = CLAIM_HEADER_LEN + subject.len() + owner.len();
-    if subject.len() > u16::MAX as usize
-        || owner.len() > u16::MAX as usize
-        || total > CONTEST_PAYLOAD_MAX
-    {
-        return Err(Error::ContestFrameTooLarge {
-            subject_len: subject.len(),
-            owner_len: owner.len(),
-            max_payload: CONTEST_PAYLOAD_MAX,
-        });
-    }
-
-    let mut buf = BytesMut::with_capacity(total);
-    buf.put_u8(subject_kind);
-    buf.put_u16_le(subject.len() as u16);
-    buf.put_u16_le(owner.len() as u16);
-    buf.put_u64_le(claimed_at_ms);
-    buf.put_u64_le(expires_at_ms);
-    buf.put_slice(subject);
-    buf.put_slice(owner);
-    Ok(buf.freeze())
-}
-
-fn encode_release(subject_kind: u8, subject: &[u8], claim_id: NetId64) -> Result<Bytes> {
-    let total = RELEASE_HEADER_LEN + subject.len();
-    if subject.len() > u16::MAX as usize || total > CONTEST_PAYLOAD_MAX {
-        return Err(Error::ContestFrameTooLarge {
-            subject_len: subject.len(),
-            owner_len: 0,
-            max_payload: CONTEST_PAYLOAD_MAX,
-        });
-    }
-
-    let mut buf = BytesMut::with_capacity(total);
-    buf.put_u64_le(claim_id.raw());
-    buf.put_u8(subject_kind);
-    buf.put_u16_le(subject.len() as u16);
-    buf.put_slice(subject);
-    Ok(buf.freeze())
-}
-
-fn encode_renew(
-    subject_kind: u8,
-    subject: &[u8],
-    claim_id: NetId64,
-    expires_at_ms: u64,
-) -> Result<Bytes> {
-    let total = RENEW_HEADER_LEN + subject.len();
-    if subject.len() > u16::MAX as usize || total > CONTEST_PAYLOAD_MAX {
-        return Err(Error::ContestFrameTooLarge {
-            subject_len: subject.len(),
-            owner_len: 0,
-            max_payload: CONTEST_PAYLOAD_MAX,
-        });
-    }
-
-    let mut buf = BytesMut::with_capacity(total);
-    buf.put_u64_le(claim_id.raw());
-    buf.put_u64_le(expires_at_ms);
-    buf.put_u8(subject_kind);
-    buf.put_u16_le(subject.len() as u16);
-    buf.put_slice(subject);
-    Ok(buf.freeze())
-}
-
-fn decode_frame(frame_kind: u8, payload: &Bytes) -> Option<DecodedContestFrame<'_>> {
-    match frame_kind {
-        CONTEST_FRAME_KIND_CLAIM => decode_claim(payload).map(DecodedContestFrame::Claim),
-        CONTEST_FRAME_KIND_RELEASE => decode_release(payload).map(DecodedContestFrame::Release),
-        CONTEST_FRAME_KIND_RENEW => decode_renew(payload).map(DecodedContestFrame::Renew),
-        _ => None,
-    }
-}
-
-fn decode_claim(payload: &Bytes) -> Option<DecodedClaim<'_>> {
-    if payload.len() < CLAIM_HEADER_LEN {
-        return None;
-    }
-
-    let subject_kind = payload[0];
-    let subject_len = u16::from_le_bytes(payload[1..3].try_into().ok()?) as usize;
-    let owner_len = u16::from_le_bytes(payload[3..5].try_into().ok()?) as usize;
-    let claimed_at_ms = u64::from_le_bytes(payload[5..13].try_into().ok()?);
-    let expires_at_ms = u64::from_le_bytes(payload[13..21].try_into().ok()?);
-    let subject_start = CLAIM_HEADER_LEN;
-    let subject_end = subject_start.checked_add(subject_len)?;
-    let owner_end = subject_end.checked_add(owner_len)?;
-    if payload.len() < owner_end {
-        return None;
-    }
-
-    Some(DecodedClaim {
-        subject_kind,
-        subject: &payload[subject_start..subject_end],
-        owner: &payload[subject_end..owner_end],
-        claimed_at_ms,
-        expires_at_ms,
-    })
-}
-
-fn decode_release(payload: &Bytes) -> Option<DecodedRelease<'_>> {
-    if payload.len() < RELEASE_HEADER_LEN {
-        return None;
-    }
-
-    let claim_id = NetId64::from_raw(u64::from_le_bytes(payload[0..8].try_into().ok()?));
-    let subject_kind = payload[8];
-    let subject_len = u16::from_le_bytes(payload[9..11].try_into().ok()?) as usize;
-    let subject_start = RELEASE_HEADER_LEN;
-    let subject_end = subject_start.checked_add(subject_len)?;
-    if payload.len() < subject_end {
-        return None;
-    }
-
-    Some(DecodedRelease {
-        subject_kind,
-        subject: &payload[subject_start..subject_end],
-        claim_id,
-    })
-}
-
-fn decode_renew(payload: &Bytes) -> Option<DecodedRenew<'_>> {
-    if payload.len() < RENEW_HEADER_LEN {
-        return None;
-    }
-
-    let claim_id = NetId64::from_raw(u64::from_le_bytes(payload[0..8].try_into().ok()?));
-    let expires_at_ms = u64::from_le_bytes(payload[8..16].try_into().ok()?);
-    let subject_kind = payload[16];
-    let subject_len = u16::from_le_bytes(payload[17..19].try_into().ok()?) as usize;
-    let subject_start = RENEW_HEADER_LEN;
-    let subject_end = subject_start.checked_add(subject_len)?;
-    if payload.len() < subject_end {
-        return None;
-    }
-
-    Some(DecodedRenew {
-        subject_kind,
-        subject: &payload[subject_start..subject_end],
-        claim_id,
-        expires_at_ms,
-    })
 }
 
 fn expires_at(now_ms: u64, ttl: Duration) -> u64 {
@@ -927,18 +628,30 @@ mod tests {
     }
 
     #[test]
-    fn claim_succeeds_after_ring_wraps_past_capacity() {
-        let fleet = Arc::new(Fleet::join("contest_wrap", 2).expect("fleet"));
+    fn active_claim_survives_churn_beyond_old_ring_capacity() {
+        let fleet = Arc::new(Fleet::join("contest_state_churn", 2).expect("fleet"));
         let claims = Contest::new(fleet);
 
-        // Churn the shared contest ring well past its capacity so the write
-        // head sits far above the window floor. Structural history aging must
-        // NOT be mistaken for lost frames: a claim must still succeed (the
-        // pre-fix code fail-closed here on every call once head > capacity).
+        let Claim::Claimed(mut long_lived) = claims
+            .try_claim_at::<OriginProbe>("long-lived", "holder", Duration::from_secs(30), 1_000)
+            .expect("long-lived claim")
+        else {
+            panic!("expected long-lived claim");
+        };
+
+        // The old ring model lost the original CLAIM after enough unrelated
+        // claim/release frames wrapped the history window. Current-state
+        // storage keeps the live subject in its slot while released subjects
+        // reuse tombstones.
         let mut now = 1_000u64;
-        for _ in 0..700 {
+        for index in 0..2_000 {
             if let Claim::Claimed(g) = claims
-                .try_claim_at::<OriginProbe>("churn", "w", Duration::from_secs(30), now)
+                .try_claim_at::<OriginProbe>(
+                    format!("churn:{index}"),
+                    "w",
+                    Duration::from_secs(30),
+                    now,
+                )
                 .expect("churn claim")
             {
                 g.release().expect("churn release");
@@ -946,12 +659,90 @@ mod tests {
             now += 1;
         }
 
-        let fresh = claims
-            .try_claim_at::<OtherProbe>("fresh", "winner", Duration::from_secs(30), now)
-            .expect("fresh claim");
-        let Claim::Claimed(guard) = fresh else {
-            panic!("claim after the ring wrapped past capacity must be Claimed");
+        long_lived
+            .renew_at(Duration::from_secs(30), now)
+            .expect("renew after churn");
+        let contender = claims
+            .try_claim_at::<OriginProbe>(
+                "long-lived",
+                "contender",
+                Duration::from_secs(30),
+                now + 1,
+            )
+            .expect("contender");
+        let Claim::YieldTo(holder) = contender else {
+            panic!("unrelated churn must not evict an active claim");
         };
-        assert_eq!(guard.owner().as_str(), "winner");
+        assert_eq!(holder.claim_id, long_lived.claim_id());
+        assert_eq!(holder.owner.as_str(), "holder");
+    }
+
+    #[test]
+    fn stale_guard_cannot_renew_or_release_successor() {
+        let fleet = Arc::new(Fleet::join("contest_stale_guard", 2).expect("fleet"));
+        let claims = Contest::new(fleet);
+
+        let Claim::Claimed(mut stale) = claims
+            .try_claim_at::<OriginProbe>("subject", "first", Duration::from_millis(5), 1_000)
+            .expect("first claim")
+        else {
+            panic!("expected first claim");
+        };
+        let Claim::Claimed(successor) = claims
+            .try_claim_at::<OriginProbe>("subject", "second", Duration::from_secs(30), 1_006)
+            .expect("successor claim")
+        else {
+            panic!("expired claim should be replaceable");
+        };
+
+        assert!(
+            stale.renew_at(Duration::from_secs(30), 1_007).is_err(),
+            "an expired, superseded guard must not resurrect its lease"
+        );
+        drop(stale);
+
+        let contender = claims
+            .try_claim_at::<OriginProbe>("subject", "third", Duration::from_secs(30), 1_008)
+            .expect("contender");
+        let Claim::YieldTo(holder) = contender else {
+            panic!("stale Drop must not release the successor");
+        };
+        assert_eq!(holder.claim_id, successor.claim_id());
+        assert_eq!(holder.owner.as_str(), "second");
+    }
+
+    #[test]
+    fn full_state_table_does_not_evict_live_subjects() {
+        use super::CONTEST_STATE_CAPACITY;
+        use crate::Error;
+
+        let fleet = Arc::new(Fleet::join("contest_state_full", 1).expect("fleet"));
+        let claims = Contest::new(fleet);
+        let mut guards = Vec::with_capacity(CONTEST_STATE_CAPACITY);
+
+        for index in 0..CONTEST_STATE_CAPACITY {
+            let Claim::Claimed(guard) = claims
+                .try_claim_at::<OriginProbe>(
+                    format!("subject:{index}"),
+                    "owner",
+                    Duration::from_secs(30),
+                    1_000,
+                )
+                .expect("table slot")
+            else {
+                panic!("each distinct subject should occupy one slot");
+            };
+            guards.push(guard);
+        }
+
+        let error = claims
+            .try_claim_at::<OriginProbe>("one-too-many", "owner", Duration::from_secs(30), 1_001)
+            .expect_err("a full table must fail instead of evicting a live lease");
+        assert!(matches!(
+            error,
+            Error::ContestStateFull {
+                capacity: CONTEST_STATE_CAPACITY
+            }
+        ));
     }
 }

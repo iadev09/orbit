@@ -1,9 +1,8 @@
-//! # `orbit-rs` — fleet-aware shared-memory rings
+//! # `orbit-rs` — fleet-aware shared memory
 //!
 //! ## What this crate is
 //!
-//! Fleet-shared, network-aware ring storage — the same-host tier between
-//! workers
+//! Fleet-shared same-host runtime storage between workers.
 //!
 //! Every process in the fleet is an equal member. There is no master,
 //! no worker — only peers. Whatever role distinction matters to the
@@ -11,9 +10,9 @@
 //!
 //! ## Status — first light (V0)
 //!
-//! V0 ships the ring API surface plus POSIX shared-memory backing on
-//! Unix. Higher-level data shapes should build on rings/cache directly
-//! instead of adding one-off shared cells here.
+//! V0 ships fixed-capacity append logs and current-state tables with POSIX
+//! shared-memory backing on Unix. Semantic layers choose the shape that
+//! matches their data: history belongs in rings; current leases do not.
 
 pub mod cache;
 pub mod contest;
@@ -46,9 +45,8 @@ pub use cache::{
 };
 pub use contest::fence::{Fence, FenceToken};
 pub use contest::guard::{
-    CONTEST_FRAME_KIND_CLAIM, CONTEST_FRAME_KIND_RELEASE, CONTEST_FRAME_KIND_RENEW,
-    CONTEST_PAYLOAD_MAX, CONTEST_RING_KIND, CONTEST_RING_SPEC, Claim, Contest, ContestOwner,
-    ContestRecord, ContestSubject, ContestType, Guard, Holder,
+    CONTEST_STATE_CAPACITY, CONTEST_STATE_KIND, CONTEST_STATE_PAYLOAD_MAX, Claim, Contest,
+    ContestOwner, ContestSubject, ContestType, Guard, Holder,
 };
 pub use epoch::OrbitEpoch;
 pub use error::{Error, Result};

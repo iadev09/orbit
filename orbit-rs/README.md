@@ -3,9 +3,9 @@
 `orbit-rs` is the primitive Orbit crate: a same-host runtime substrate
 for recent facts shared by sibling processes.
 
-It provides type-keyed bounded rings, optional POSIX shared-memory
-backing, fleet membership, and small reusable substrates for cache,
-events, and contest/claim coordination.
+It provides type-keyed bounded rings, a bounded current-state table for
+Contest leases, optional POSIX shared-memory backing, fleet membership,
+and small reusable substrates for cache, events, and RPC.
 
 `orbit-rs` is framework-agnostic. Application lifecycle and runtime
 policy belong above this crate.
@@ -24,6 +24,9 @@ OrbitTyped
 
 Ring / Frame
   fixed-capacity append surface with bounded payloads
+
+Contest state
+  fixed-capacity current lease table keyed by typed subject
 
 netid64::NetId64
   runtime-bound id carried by every frame
@@ -46,14 +49,15 @@ Fleet::join(...)
   -> process-local rings
 
 Fleet::join_shm(...)
-  -> POSIX shared-memory rings visible to sibling processes
+  -> POSIX shared-memory surfaces visible to sibling processes
 ```
 
-A fleet has a name, a `NodeId`, an expected fleet size, and one ring
-registry. Every `OrbitTyped::KIND` maps to its own ring and declares its
-own `RingSpec { capacity, payload_capacity, topology }`. Role hierarchy
-is outside the crate: master, worker, standalone process, or sibling
-tool can all join the same fleet if the embedder gives them compatible
+A fleet has a name, a `NodeId`, an expected fleet size, and shared
+surface registries. Every `OrbitTyped::KIND` maps to its own ring and
+declares its own `RingSpec { capacity, payload_capacity, topology }`.
+Contest uses one separate fleet-scoped state surface. Role hierarchy is
+outside the crate: master, worker, standalone process, or sibling tool
+can all join the same fleet if the embedder gives them compatible
 configuration.
 
 On Unix, shared-memory ring names are derived from:
@@ -249,20 +253,23 @@ same typed subject into a small claim/yield protocol.
 
 ```text
 claim typed subject
-  -> observe active claims
-  -> earliest active claimant receives Guard
-  -> later claimants receive YieldTo(holder)
-  -> dropping Guard publishes release
+  -> hash directly to its current state slot
+  -> free/expired subject receives Guard
+  -> active subject returns YieldTo(holder)
+  -> renew updates the same slot
+  -> dropping Guard tombstones the matching slot
 ```
 
-Every peer may publish a claim. The earliest active claim receives a
-drop-released `Guard`; later claimants receive `YieldTo(holder)`.
+Contest uses one fixed-capacity, open-addressed current-state table. A
+claim, renewal, or release takes a short process-recoverable lock and
+touches the subject's probe chain; the lock is not held while the winner
+performs guarded work. Operations do not scan or reconstruct ring history.
 
-Contest uses one `SharedOrdered` ring, so the counters observed below the
-head are a complete global claim order across processes. The writer lock is
-held only while publishing one frame, not while the winner performs the
-guarded work. If the committed resident window cannot be read completely,
-Contest fails closed rather than choosing a winner from partial history.
+`CONTEST_STATE_CAPACITY` is the maximum number of simultaneously resident
+subjects, not a history length. Renewing a long-lived lease keeps the same
+claim id and fencing token even if arbitrarily many unrelated subjects are
+claimed and released. A full table fails explicitly instead of evicting a
+live lease.
 
 A subject is a caller-defined `ContestType::KIND` plus a label. The
 owner label is only for observation; Orbit does not interpret it.
