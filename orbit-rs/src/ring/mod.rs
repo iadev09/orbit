@@ -2,7 +2,7 @@
 //!
 //! > *"orbit runtime yani ring"* — the place where the fleet's
 //! > shared state actually lives at the lowest level. Higher-level
-//! > shapes (`OrbitCache`, future metrics/event substrates, etc.)
+//! > shapes (cache mutations, metrics snapshots, event streams, etc.)
 //! > reduce to *one or more rings*.
 //!
 //! ## Shape
@@ -260,6 +260,11 @@ impl Ring {
             .fetch_add(1, Ordering::AcqRel)
             .checked_add(1)
             .expect("ring semantic version exhausted")
+    }
+
+    /// Last semantic version allocated for this ring.
+    pub fn current_version(&self) -> u64 {
+        self.version_counter.load(Ordering::Acquire)
     }
 
     /// Append a frame. Atomically reserves the next counter, mints

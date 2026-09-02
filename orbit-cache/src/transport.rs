@@ -80,20 +80,7 @@ impl<L: CacheLayout> CacheTransport<L> {
         value: &[u8],
         ttl: Option<Duration>,
     ) -> Result<CacheMutation> {
-        let max_key_len = self.max_key_len();
-        if key.is_empty() || key.len() > max_key_len {
-            return Err(Error::KeyTooLarge {
-                key_len: key.len(),
-                max: max_key_len,
-            });
-        }
-        let max_value_len = self.max_value_len();
-        if value.len() > max_value_len {
-            return Err(Error::ValueTooLarge {
-                value_len: value.len(),
-                max: max_value_len,
-            });
-        }
+        self.validate_put(key, value)?;
 
         let payload_version = self.fleet.next_ring_version::<PayloadRecord<L>>();
         let chunks = split_payload::<L>(value);
@@ -125,6 +112,7 @@ impl<L: CacheLayout> CacheTransport<L> {
     }
 
     pub fn publish_delete(&self, key: &[u8]) -> Result<CacheMutation> {
+        self.validate_key(key)?;
         let encoded = protocol::encode_delete::<L>(key)?;
         let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
         let mutation_id = self.publish_mutation(FRAME_KIND_DELETE, sequence, encoded)?;
@@ -208,6 +196,33 @@ impl<L: CacheLayout> CacheTransport<L> {
         L::PAYLOAD_RING_SPEC
             .capacity
             .saturating_mul(L::PAYLOAD_RING_SPEC.payload_capacity)
+    }
+
+    pub fn validate_key(&self, key: &[u8]) -> Result<()> {
+        let max = self.max_key_len();
+        if key.is_empty() || key.len() > max {
+            return Err(Error::KeyTooLarge {
+                key_len: key.len(),
+                max,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.validate_key(key)?;
+        let max = self.max_value_len();
+        if value.len() > max {
+            return Err(Error::ValueTooLarge {
+                value_len: value.len(),
+                max,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn current_revision_sequence(&self) -> u64 {
+        self.fleet.current_ring_version::<MutationRecord<L>>()
     }
 
     /// Reset both cache rings during an owner-controlled, quiescent boot.

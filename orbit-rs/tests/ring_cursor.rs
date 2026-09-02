@@ -219,4 +219,5 @@ fn per_node_ring_versions_share_one_semantic_sequence() {
 
     assert_eq!(fleet.next_ring_version::<BatchRecord>(), 1);
     assert_eq!(fleet.next_ring_version::<BatchRecord>(), 2);
+    assert_eq!(fleet.current_ring_version::<BatchRecord>(), 2);
 }

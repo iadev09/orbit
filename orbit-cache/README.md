@@ -70,7 +70,8 @@ The publisher updates its own L1 immediately. Each sibling process must drive
 let result = cache.poll();
 
 if result.resync_required {
-    // Rebuild from the authoritative source before enabling local hits again.
+    // Only when ordinary misses can fall through to a backing store:
+    cache.recover_from_backing();
 }
 
 for key in result.payload_unavailable {

@@ -5,7 +5,7 @@ for recent facts shared by sibling processes.
 
 It provides type-keyed bounded rings, a bounded current-state table for
 Contest leases, optional POSIX shared-memory backing, fleet membership,
-and small reusable substrates for cache, events, and RPC.
+and small reusable substrates for events and RPC.
 
 `orbit-rs` is framework-agnostic. Application lifecycle and runtime
 policy belong above this crate.
@@ -32,7 +32,7 @@ netid64::NetId64
   runtime-bound id carried by every frame
 
 Substrates
-  cache, event bus, RPC, contest, typed POD values
+  event bus, RPC, contest, typed POD values
 ```
 
 Frame identifiers come from the external
@@ -158,28 +158,16 @@ This path is for small structs whose byte layout is known and stable.
 Variable-length records use explicit encoders in layers such as cache,
 event, contest, and metrics.
 
-## Cache
+## Cache Layer
 
-`OrbitCache` is a byte-oriented cache primitive over one dedicated ring.
-It does not choose a serializer and it does not know application values.
+Cache semantics live in the separate `orbit-cache` crate. It uses Orbit's
+generic ring, cursor, shared-version, batch-publication, and notification
+primitives to maintain a process-local L1 through dedicated mutation and
+addressable payload rings.
 
-Each mutation is one frame:
-
-```text
-put    key bytes, value bytes, optional expiry
-delete key bytes
-reset  prefix bytes
-```
-
-Reads walk backward from the ring head. The newest matching frame wins:
-
-- `put` returns a value unless expired;
-- `delete` shadows older puts;
-- `reset` shadows older entries inside the cache prefix.
-
-Values are inline and bounded by the ring payload size. Larger object
-caches should be built above this primitive, for example with a ring as
-mutation log plus a separate shared arena.
+`orbit-rs` deliberately does not expose a key/value cache API. This keeps the
+primitive crate independent of cache eviction, TTL, resynchronization, and
+payload-retention policy.
 
 ## Event Bus
 

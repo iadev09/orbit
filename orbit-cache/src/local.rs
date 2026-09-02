@@ -43,7 +43,7 @@ pub struct LocalCache {
 
 struct LocalState {
     slots: LruCache<Vec<u8>, LocalSlot>,
-    revision_floor: Option<CacheRevision>,
+    revision_floor: Option<u64>,
     coherent: bool,
 }
 
@@ -126,8 +126,7 @@ impl LocalCache {
             .coherent
     }
 
-    /// Clear uncertain local state after transport loss. A later backing-store
-    /// integration will refill entries before calling `mark_resynced`.
+    /// Clear uncertain local state after transport loss.
     pub fn require_resync(&self) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         state.advance_floor_from_slots();
@@ -135,15 +134,22 @@ impl LocalCache {
         state.coherent = false;
     }
 
-    /// Mark the current local contents as a coherent snapshot.
-    ///
-    /// This does not load data by itself; the embedding cache layer must first
-    /// install the authoritative backing-store snapshot.
-    pub fn mark_resynced(&self) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .coherent = true;
+    pub(crate) fn recover_from_backing(&self, revision_floor: u64) {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.slots.clear();
+        state.revision_floor = Some(
+            state
+                .revision_floor
+                .map_or(revision_floor, |current| current.max(revision_floor)),
+        );
+        state.coherent = true;
+    }
+
+    pub(crate) fn reset_after_transport_reset(&self) {
+        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        state.slots.clear();
+        state.revision_floor = None;
+        state.coherent = true;
     }
 
     pub(crate) fn apply<L: CacheLayout>(
@@ -201,7 +207,7 @@ impl LocalCache {
                 }
             }
             CacheMutation::Reset { revision } => {
-                state.advance_floor(revision);
+                state.advance_floor(revision.sequence);
                 ApplyOutcome::Applied
             }
         }
@@ -237,14 +243,17 @@ impl LocalCache {
     pub(crate) fn reset_local(&self, revision: CacheRevision) {
         let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if state.accepts(revision) {
-            state.advance_floor(revision);
+            state.advance_floor(revision.sequence);
         }
     }
 }
 
 impl LocalState {
     fn accepts(&self, revision: CacheRevision) -> bool {
-        if self.revision_floor.is_some_and(|floor| revision <= floor) {
+        if self
+            .revision_floor
+            .is_some_and(|floor| revision.sequence <= floor)
+        {
             return false;
         }
         true
@@ -262,18 +271,18 @@ impl LocalState {
         if let Some((removed_key, removed)) = self.slots.push(key, slot)
             && removed_key != inserted_key
         {
-            self.advance_floor(removed.revision());
+            self.advance_floor(removed.revision().sequence);
         }
         self.slots.peek(&inserted_key).is_some()
     }
 
     fn advance_floor_from_slots(&mut self) {
         if let Some(revision) = self.slots.iter().map(|(_, slot)| slot.revision()).max() {
-            self.advance_floor(revision);
+            self.advance_floor(revision.sequence);
         }
     }
 
-    fn advance_floor(&mut self, revision: CacheRevision) {
+    fn advance_floor(&mut self, revision: u64) {
         let floor = self
             .revision_floor
             .map_or(revision, |current| current.max(revision));
@@ -281,7 +290,7 @@ impl LocalState {
         let stale_keys = self
             .slots
             .iter()
-            .filter(|(_, slot)| slot.revision() <= floor)
+            .filter(|(_, slot)| slot.revision().sequence <= floor)
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in stale_keys {

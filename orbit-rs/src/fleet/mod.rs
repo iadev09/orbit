@@ -469,6 +469,18 @@ impl Fleet {
         }
     }
 
+    /// Return the last semantic version allocated for `T` without advancing it.
+    pub fn current_ring_version<T: OrbitTyped>(&self) -> u64 {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => r.get_or_create::<T>().current_version(),
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .expect("SHM ring open failed — fleet unusable")
+                .current_version(),
+        }
+    }
+
     /// Clear every lane for `T` and reset all heads to zero.
     ///
     /// This is an owner-side boot cleanup primitive. It is safe for

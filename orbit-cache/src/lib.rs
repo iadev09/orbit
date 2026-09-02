@@ -96,6 +96,14 @@ impl<L: CacheLayout> Cache<L> {
         self.local.read(key)
     }
 
+    pub fn validate_put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.transport.validate_put(key, value)
+    }
+
+    pub fn validate_key(&self, key: &[u8]) -> Result<()> {
+        self.transport.validate_key(key)
+    }
+
     pub fn put(&self, key: &[u8], value: &[u8], ttl: Option<Duration>) -> Result<CacheRevision> {
         let mutation = self.transport.publish_put(key, value, ttl)?;
         let CacheMutation::Put {
@@ -127,6 +135,19 @@ impl<L: CacheLayout> Cache<L> {
         };
         self.local.reset_local(revision);
         Ok(revision)
+    }
+
+    /// Reset cache transport during an owner-controlled, quiescent boot and
+    /// align this handle's cursor and empty L1 with the new ring generation.
+    pub fn reset_transport(&self) -> Result<()> {
+        let mut cursor = self
+            .cursor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.transport.reset_rings()?;
+        *cursor = self.transport.cursor_at_head();
+        self.local.reset_after_transport_reset();
+        Ok(())
     }
 
     /// Drain every committed mutation currently visible and apply it to this
@@ -161,6 +182,22 @@ impl<L: CacheLayout> Cache<L> {
         }
         result.resync_required = !self.local.is_coherent();
         result
+    }
+
+    /// Discard uncertain L1 state and resume after the current mutation heads.
+    ///
+    /// Call this only when a higher layer can satisfy ordinary misses from an
+    /// authoritative source or L2. Mutations whose revisions were allocated
+    /// before this boundary are ignored even if a delayed writer commits them
+    /// after the new cursor snapshot.
+    pub fn recover_from_backing(&self) {
+        let mut cursor = self
+            .cursor
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *cursor = self.transport.cursor_at_head();
+        let revision_floor = self.transport.current_revision_sequence();
+        self.local.recover_from_backing(revision_floor);
     }
 
     pub fn local(&self) -> &LocalCache {

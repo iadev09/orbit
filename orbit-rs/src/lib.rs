@@ -14,7 +14,6 @@
 //! shared-memory backing on Unix. Semantic layers choose the shape that
 //! matches their data: history belongs in rings; current leases do not.
 
-pub mod cache;
 pub mod contest;
 pub mod epoch;
 pub mod error;
@@ -38,11 +37,6 @@ pub mod ring_shm {
     pub use crate::ring::shm::*;
 }
 
-#[cfg(unix)]
-pub use cache::{
-    CACHE_PAYLOAD_MAX, CACHE_RING_KIND, CACHE_RING_SPEC, OrbitCache, OrbitCacheEntry,
-    OrbitCacheRead,
-};
 pub use contest::fence::{Fence, FenceToken};
 pub use contest::guard::{
     CONTEST_STATE_CAPACITY, CONTEST_STATE_KIND, CONTEST_STATE_PAYLOAD_MAX, Claim, Contest,

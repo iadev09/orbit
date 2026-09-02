@@ -124,6 +124,29 @@ fn mutation_lag_disables_local_hits_until_resync() {
 }
 
 #[test]
+fn backing_recovery_resubscribes_with_an_empty_coherent_l1() {
+    let fleet = Arc::new(Fleet::join("cache_recover", 1).expect("fleet"));
+    let publisher = Cache::<TinyLayout>::new(fleet.clone(), capacity(8)).expect("publisher");
+    let peer = Cache::<TinyLayout>::new(fleet, capacity(8)).expect("peer");
+
+    for index in 0..9 {
+        publisher
+            .delete(format!("key-{index}").as_bytes())
+            .expect("delete");
+    }
+    assert!(peer.poll().resync_required);
+
+    peer.recover_from_backing();
+
+    assert_eq!(peer.read(b"backing-key"), CacheRead::Miss);
+    publisher
+        .put(b"future", b"visible", None)
+        .expect("future put");
+    assert_eq!(peer.poll().applied, 1);
+    assert!(matches!(peer.read(b"future"), CacheRead::Hit(_)));
+}
+
+#[test]
 fn ttl_expiry_becomes_a_local_miss() {
     let fleet = Arc::new(Fleet::join("cache_ttl", 1).expect("fleet"));
     let cache = Cache::<TinyLayout>::new(fleet, capacity(8)).expect("cache");

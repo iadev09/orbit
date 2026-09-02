@@ -477,6 +477,12 @@ impl ShmRing {
             .expect("SHM ring semantic version exhausted")
     }
 
+    /// Last semantic version allocated by any process attached to this ring.
+    pub fn current_version(&self) -> u64 {
+        let header = unsafe { &*(self.region.as_ptr() as *const ShmRingHeader) };
+        header.version_counter.load(Ordering::Acquire)
+    }
+
     /// Append a frame. Atomically reserves the next counter, mints
     /// the [`NetId64`], writes the slot. Returns the minted id.
     pub fn write(

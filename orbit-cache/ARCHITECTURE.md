@@ -72,9 +72,13 @@ miss and is returned in `CachePoll::payload_unavailable`. The higher layer may
 recover that key from its authoritative source or L2.
 
 If the mutation cursor reports lost or malformed frames, the L1 clears all
-values and becomes `ResyncRequired`. A backing-store adapter must re-establish
-coherence before local hits are served again. The current crate exposes this
-state explicitly but does not yet define the L2 hydration interface.
+values and becomes `ResyncRequired`. A backing-store adapter may call
+`Cache::recover_from_backing`: the cursor moves to the current lane heads, the
+L1 becomes an empty coherent cache, and ordinary misses fall through to the
+backing store. The recovery boundary also records the current shared mutation
+sequence, so an older writer that commits late cannot repopulate stale bytes.
+Without a backing store the caller must leave the cache in
+`ResyncRequired` rather than silently accepting an incomplete view.
 
 ## Revisions
 
@@ -140,6 +144,11 @@ number of resident keys is bounded independently by the process-local L1.
 `Cache::new` creates an empty coherent L1 and positions its cursor after all
 currently committed mutations. `Cache::replay_retained` starts at counter zero
 and replays only the history still present in the bounded rings.
+
+`Cache::reset_transport` is the owner-controlled boot primitive. It resets both
+rings only while peers are quiescent, then realigns the calling handle's cursor
+and empty L1 with the new generation. Runtime cache clearing uses
+`Cache::reset`, which publishes an ordinary `Reset` mutation instead.
 
 Publishing through `Cache::put`, `delete`, or `reset` applies the mutation to
 the publisher's L1 immediately. Other processes observe it when their owner
