@@ -50,20 +50,20 @@ impl<T: OrbitTyped> RingFrameSource for FleetLaneSource<'_, T> {
 
 /// Caller-owned positions for every node lane of one ring type.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FleetLaneCursor {
+pub struct FleetLaneCursor {
     lanes: Vec<RingCursor>,
     initial_counter: u64,
 }
 
 impl FleetLaneCursor {
-    pub(crate) const fn from_counter(initial_counter: u64) -> Self {
+    pub const fn from_counter(initial_counter: u64) -> Self {
         Self {
             lanes: Vec::new(),
             initial_counter,
         }
     }
 
-    pub(crate) fn minimum_next_counter(&self) -> u64 {
+    pub fn minimum_next_counter(&self) -> u64 {
         self.lanes
             .iter()
             .map(|cursor| cursor.next_counter())
@@ -74,7 +74,7 @@ impl FleetLaneCursor {
 
 /// Combined result of walking every node lane once.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct FleetLanePoll {
+pub struct FleetLanePoll {
     pub frames: Vec<Frame>,
     pub loss: RingLoss,
 }
@@ -131,7 +131,9 @@ impl Fleet {
         poll_ring(&FleetRingSource::<T>::new(self), cursor)
     }
 
-    pub(crate) fn lane_cursor_at_head<T: OrbitTyped>(&self) -> FleetLaneCursor {
+    /// Create one caller-owned cursor per physical node lane, starting at each
+    /// lane's current head.
+    pub fn lane_cursor_at_head<T: OrbitTyped>(&self) -> FleetLaneCursor {
         self.assert_per_node::<T>();
         let lanes = (0..self.fleet_size())
             .map(|node| RingCursor::from_counter(self.lane_head::<T>(NodeId::new(u16::from(node)))))
@@ -142,7 +144,9 @@ impl Fleet {
         }
     }
 
-    pub(crate) fn lane_cursor_from_start<T: OrbitTyped>(&self) -> FleetLaneCursor {
+    /// Create one caller-owned cursor per physical node lane, starting at
+    /// counter zero.
+    pub fn lane_cursor_from_start<T: OrbitTyped>(&self) -> FleetLaneCursor {
         self.assert_per_node::<T>();
         FleetLaneCursor {
             lanes: vec![RingCursor::from_start(); usize::from(self.fleet_size())],
@@ -150,7 +154,10 @@ impl Fleet {
         }
     }
 
-    pub(crate) fn poll_lanes<T: OrbitTyped>(&self, cursor: &mut FleetLaneCursor) -> FleetLanePoll {
+    /// Poll every physical node lane and combine the retained frames and loss
+    /// counters into one result. Frames retain their writer node in `id`;
+    /// callers that need semantic ordering across lanes must provide it.
+    pub fn poll_lanes<T: OrbitTyped>(&self, cursor: &mut FleetLaneCursor) -> FleetLanePoll {
         self.assert_per_node::<T>();
         if cursor.lanes.is_empty() {
             cursor.lanes = vec![

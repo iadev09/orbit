@@ -18,7 +18,7 @@ use crate::ring::shm::{ShmRing, ShmRingRegistry};
 use crate::ring::{Frame, Ring, RingRegistry, RingTopology};
 
 mod cursor;
-pub(crate) use cursor::FleetLaneCursor;
+pub use cursor::{FleetLaneCursor, FleetLanePoll};
 
 /// A node's slot inside the fleet — assigned at `join` time.
 ///
@@ -274,6 +274,40 @@ impl Fleet {
         }
     }
 
+    /// Publish a contiguous batch into one ring lane.
+    ///
+    /// The returned ids are ordered and consecutive. For per-node rings the
+    /// lane head becomes visible only after every frame in the batch has been
+    /// committed. Semantic layers can use this to publish a multi-slot blob,
+    /// then publish a separate descriptor that references the first id and
+    /// frame count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ring cannot be opened, a payload exceeds the declared
+    /// slot capacity, or the batch itself is larger than the ring.
+    pub fn publish_batch<T: OrbitTyped>(
+        &self,
+        frame_kind: u8,
+        ver: u64,
+        payloads: Vec<Bytes>,
+    ) -> Vec<NetId64> {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => {
+                let ring = r.get_or_create::<T>();
+                ring.write_batch(self.node_id(), frame_kind, ver, payloads)
+            }
+            #[cfg(unix)]
+            RingBacking::Shm(r) => {
+                let ring = r
+                    .get_or_create_for::<T>()
+                    .expect("SHM ring open failed — fleet unusable");
+                ring.write_batch(self.node_id(), frame_kind, ver, payloads)
+                    .expect("SHM ring batch write failed")
+            }
+        }
+    }
+
     /// Look up a previously-published frame by its id. Returns the
     /// frame if its slot still holds the same id (i.e. the ring has
     /// not wrapped past it).
@@ -419,6 +453,22 @@ impl Fleet {
         }
     }
 
+    /// Allocate one semantic version shared by every writer lane of `T`.
+    ///
+    /// This is separate from each lane's physical frame counter. It is useful
+    /// for semantic layers that retain per-node write scalability but require
+    /// a deterministic fleet-wide last-write-wins order.
+    pub fn next_ring_version<T: OrbitTyped>(&self) -> u64 {
+        match &self.inner.backing {
+            RingBacking::InMemory(r) => r.get_or_create::<T>().next_version(),
+            #[cfg(unix)]
+            RingBacking::Shm(r) => r
+                .get_or_create_for::<T>()
+                .expect("SHM ring open failed — fleet unusable")
+                .next_version(),
+        }
+    }
+
     /// Clear every lane for `T` and reset all heads to zero.
     ///
     /// This is an owner-side boot cleanup primitive. It is safe for
@@ -441,7 +491,12 @@ impl Fleet {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub(crate) fn ring_event_fd<T: OrbitTyped>(&self) -> std::io::Result<RingEventFd> {
+    /// Create a process-local readiness fd for one notified SHM ring.
+    ///
+    /// The fd only signals that the ring generation changed. After draining
+    /// it, callers must poll the ring with their own cursor. Multiple writes
+    /// may coalesce into one readiness notification.
+    pub fn ring_event_fd<T: OrbitTyped>(&self) -> std::io::Result<RingEventFd> {
         match &self.inner.backing {
             RingBacking::Shm(rings) => RingEventFd::new(rings.get_or_create_for::<T>()?),
             RingBacking::InMemory(_) => Err(std::io::Error::new(
@@ -452,7 +507,8 @@ impl Fleet {
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub(crate) fn publish_notified<T: OrbitTyped>(
+    /// Publish one frame and notify native waiters after it commits.
+    pub fn publish_notified<T: OrbitTyped>(
         &self,
         frame_kind: u8,
         ver: u64,
@@ -471,6 +527,33 @@ impl Fleet {
                     .get_or_create::<T>()
                     .write(self.node_id(), frame_kind, ver, payload))
             }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    /// Publish one contiguous batch and notify native waiters once after the
+    /// complete batch commits.
+    pub fn publish_batch_notified<T: OrbitTyped>(
+        &self,
+        frame_kind: u8,
+        ver: u64,
+        payloads: Vec<Bytes>,
+    ) -> std::io::Result<Vec<NetId64>> {
+        match &self.inner.backing {
+            RingBacking::Shm(rings) => {
+                let ring = rings.get_or_create_for::<T>()?;
+                let ids = ring.write_batch(self.node_id(), frame_kind, ver, payloads)?;
+                if !ids.is_empty() {
+                    RingEventFd::notify(&ring)?;
+                }
+                Ok(ids)
+            }
+            RingBacking::InMemory(rings) => Ok(rings.get_or_create::<T>().write_batch(
+                self.node_id(),
+                frame_kind,
+                ver,
+                payloads,
+            )),
         }
     }
 }

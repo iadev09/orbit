@@ -76,7 +76,7 @@ const SLOT_ALIGNMENT: usize = 64;
 /// Cache-line aligned to keep the header on its own line.
 #[repr(C, align(64))]
 struct ShmRingHeader {
-    _reserved_head: AtomicU64,
+    version_counter: AtomicU64,
     capacity: u64,
     magic: u32,
     version: u32,
@@ -254,7 +254,7 @@ impl ShmRing {
                 ptr::write(
                     header_ptr,
                     ShmRingHeader {
-                        _reserved_head: AtomicU64::new(0),
+                        version_counter: AtomicU64::new(0),
                         capacity: spec.capacity as u64,
                         magic: MAGIC,
                         version: VERSION,
@@ -466,6 +466,17 @@ impl ShmRing {
         self.lane_header(lane).write_pos.load(Ordering::Acquire)
     }
 
+    /// Allocate one non-zero semantic version shared by all writer lanes and
+    /// processes attached to this ring.
+    pub fn next_version(&self) -> u64 {
+        let header = unsafe { &*(self.region.as_ptr() as *const ShmRingHeader) };
+        header
+            .version_counter
+            .fetch_add(1, Ordering::AcqRel)
+            .checked_add(1)
+            .expect("SHM ring semantic version exhausted")
+    }
+
     /// Append a frame. Atomically reserves the next counter, mints
     /// the [`NetId64`], writes the slot. Returns the minted id.
     pub fn write(
@@ -519,6 +530,94 @@ impl ShmRing {
                     .write_pos
                     .store(counter.wrapping_add(1), Ordering::Release);
                 Ok(id)
+            }
+        }
+    }
+
+    /// Append one contiguous batch to a lane and return consecutive ids.
+    ///
+    /// Per-node and shared-ordered lane heads advance only after the complete
+    /// batch has committed. The batch may not exceed the ring capacity.
+    pub fn write_batch(
+        &self,
+        node_id: NodeId,
+        frame_kind: u8,
+        ver: u64,
+        payloads: Vec<Bytes>,
+    ) -> std::io::Result<Vec<NetId64>> {
+        if payloads.len() > self.capacity {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("batch {} > ring capacity {}", payloads.len(), self.capacity),
+            ));
+        }
+        if let Some(payload) = payloads
+            .iter()
+            .find(|payload| payload.len() > self.payload_capacity)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "payload {} > ring payload capacity {}",
+                    payload.len(),
+                    self.payload_capacity
+                ),
+            ));
+        }
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let lane = self.lane_index(node_id);
+        let write_slots = |start: u64, payloads: Vec<Bytes>| {
+            payloads
+                .into_iter()
+                .enumerate()
+                .map(|(offset, payload)| {
+                    self.write_slot(
+                        lane,
+                        node_id,
+                        start.wrapping_add(offset as u64),
+                        frame_kind,
+                        ver,
+                        &payload,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        match self.topology {
+            RingTopology::Shared => {
+                let start = self
+                    .lane_header(lane)
+                    .write_pos
+                    .fetch_add(payloads.len() as u64, Ordering::AcqRel);
+                Ok(write_slots(start, payloads))
+            }
+            RingTopology::PerNode => {
+                let _write = self.write_locks[lane]
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let lane_header = self.lane_header(lane);
+                let start = lane_header.write_pos.load(Ordering::Relaxed);
+                let ids = write_slots(start, payloads);
+                lane_header
+                    .write_pos
+                    .store(start.wrapping_add(ids.len() as u64), Ordering::Release);
+                Ok(ids)
+            }
+            RingTopology::SharedOrdered => {
+                let _write = self.write_locks[lane]
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let _cross_process = self.region.lock_exclusive()?;
+                let lane_header = self.lane_header(lane);
+                let start = lane_header.write_pos.load(Ordering::Relaxed);
+                let ids = write_slots(start, payloads);
+                lane_header
+                    .write_pos
+                    .store(start.wrapping_add(ids.len() as u64), Ordering::Release);
+                Ok(ids)
             }
         }
     }
@@ -666,6 +765,8 @@ impl ShmRing {
         for lane in 0..self.lane_count {
             self.lane_header(lane).write_pos.store(0, Ordering::Release);
         }
+        let header = unsafe { &*(self.region.as_ptr() as *const ShmRingHeader) };
+        header.version_counter.store(0, Ordering::Release);
     }
 
     fn lane_index(&self, node_id: NodeId) -> usize {

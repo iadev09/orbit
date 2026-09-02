@@ -175,6 +175,8 @@ pub struct Ring {
     /// Maximum inline payload bytes for this ring lane.
     payload_capacity: usize,
     topology: RingTopology,
+    /// Ring-wide semantic version allocator shared by every writer lane.
+    version_counter: AtomicU64,
     lanes: Vec<RingLane>,
 }
 
@@ -205,6 +207,7 @@ impl Ring {
             capacity,
             payload_capacity: spec.payload_capacity,
             topology: spec.topology,
+            version_counter: AtomicU64::new(0),
             lanes,
         }
     }
@@ -247,6 +250,18 @@ impl Ring {
         self.lane(node_id).write_pos.load(Ordering::Acquire)
     }
 
+    /// Allocate one non-zero semantic version shared by every writer lane.
+    ///
+    /// This counter is independent of physical ring positions. Semantic
+    /// layers can use it when per-node lanes need one deterministic
+    /// last-write-wins order.
+    pub fn next_version(&self) -> u64 {
+        self.version_counter
+            .fetch_add(1, Ordering::AcqRel)
+            .checked_add(1)
+            .expect("ring semantic version exhausted")
+    }
+
     /// Append a frame. Atomically reserves the next counter, mints
     /// the [`NetId64`], and writes the frame into the corresponding
     /// slot. Returns the minted id.
@@ -277,6 +292,85 @@ impl Ring {
                 lane.write_pos
                     .store(counter.wrapping_add(1), Ordering::Release);
                 id
+            }
+        }
+    }
+
+    /// Append a contiguous batch to one lane and return its consecutive ids.
+    ///
+    /// Per-node and shared-ordered lanes expose the new head only after the
+    /// whole batch commits. An empty batch is a no-op. A batch larger than the
+    /// ring is rejected because its first frames could not remain addressable
+    /// when the method returns.
+    pub fn write_batch(
+        &self,
+        node_id: NodeId,
+        frame_kind: u8,
+        ver: u64,
+        payloads: Vec<Bytes>,
+    ) -> Vec<NetId64> {
+        assert!(
+            payloads.len() <= self.capacity,
+            "batch {} > ring capacity {}",
+            payloads.len(),
+            self.capacity
+        );
+        for payload in &payloads {
+            assert!(
+                payload.len() <= self.payload_capacity,
+                "payload {} > ring payload capacity {}",
+                payload.len(),
+                self.payload_capacity
+            );
+        }
+        if payloads.is_empty() {
+            return Vec::new();
+        }
+
+        let lane = self.lane(node_id);
+        match self.topology {
+            RingTopology::Shared => {
+                let start = lane
+                    .write_pos
+                    .fetch_add(payloads.len() as u64, Ordering::AcqRel);
+                payloads
+                    .into_iter()
+                    .enumerate()
+                    .map(|(offset, payload)| {
+                        self.write_frame(
+                            lane,
+                            node_id,
+                            start.wrapping_add(offset as u64),
+                            frame_kind,
+                            ver,
+                            payload,
+                        )
+                    })
+                    .collect()
+            }
+            RingTopology::PerNode | RingTopology::SharedOrdered => {
+                let _write = lane
+                    .write_lock
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let start = lane.write_pos.load(Ordering::Relaxed);
+                let ids = payloads
+                    .into_iter()
+                    .enumerate()
+                    .map(|(offset, payload)| {
+                        self.write_frame(
+                            lane,
+                            node_id,
+                            start.wrapping_add(offset as u64),
+                            frame_kind,
+                            ver,
+                            payload,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                lane.write_pos
+                    .store(start.wrapping_add(ids.len() as u64), Ordering::Release);
+                ids
             }
         }
     }
@@ -369,6 +463,7 @@ impl Ring {
             }
             lane.write_pos.store(0, Ordering::Release);
         }
+        self.version_counter.store(0, Ordering::Release);
     }
 
     fn lane(&self, node_id: NodeId) -> &RingLane {

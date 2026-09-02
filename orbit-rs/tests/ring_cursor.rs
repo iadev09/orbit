@@ -20,6 +20,14 @@ impl OrbitTyped for SmallWindowRecord {
     const RING_SPEC: RingSpec = RingSpec::new(2, 16);
 }
 
+#[derive(Clone, Debug)]
+struct BatchRecord;
+
+impl OrbitTyped for BatchRecord {
+    const KIND: u8 = 33;
+    const RING_SPEC: RingSpec = RingSpec::per_node(4, 16);
+}
+
 #[test]
 fn cursor_from_start_reads_available_history() {
     let ring = Ring::new::<CursorRecord>();
@@ -175,4 +183,40 @@ fn pending_counter_does_not_advance_cursor() {
     assert_eq!(committed.frames.len(), 1);
     assert_eq!(&committed.frames[0].payload[..], b"committed");
     assert_eq!(cursor.next_counter(), 1);
+}
+
+#[test]
+fn batch_publish_reserves_consecutive_ids_in_one_lane() {
+    let fleet = Fleet::join("cursor_batch", 1).expect("fleet");
+    let ids = fleet.publish_batch::<BatchRecord>(
+        7,
+        42,
+        vec![
+            bytes::Bytes::from_static(b"one"),
+            bytes::Bytes::from_static(b"two"),
+            bytes::Bytes::from_static(b"three"),
+        ],
+    );
+
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0].counter(), 0);
+    assert_eq!(ids[1].counter(), 1);
+    assert_eq!(ids[2].counter(), 2);
+    assert_eq!(fleet.lane_head::<BatchRecord>(NodeId::ZERO), 3);
+    assert_eq!(
+        &fleet.read(ids[0]).expect("first frame").payload[..],
+        b"one"
+    );
+    assert_eq!(
+        &fleet.read(ids[2]).expect("last frame").payload[..],
+        b"three"
+    );
+}
+
+#[test]
+fn per_node_ring_versions_share_one_semantic_sequence() {
+    let fleet = Fleet::join_as("cursor_versions", 2, NodeId::new(1)).expect("fleet");
+
+    assert_eq!(fleet.next_ring_version::<BatchRecord>(), 1);
+    assert_eq!(fleet.next_ring_version::<BatchRecord>(), 2);
 }

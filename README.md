@@ -32,7 +32,11 @@ Typical use cases:
 
 - `orbit-rs`: the primitive layer. It owns fleet membership,
   type-keyed rings, the Contest current-state table, POSIX shared-memory
-  backing, cache/event/RPC substrates, and cursor/loss accounting.
+  backing, event/RPC substrates, notification bridges, batch publication,
+  and cursor/loss accounting.
+- [`orbit-cache`](orbit-cache/README.md): a fleet-coherent local byte cache
+  built from a dedicated mutation ring and addressable multi-slot payload
+  ring.
 - `orbit-metrics`: a metrics snapshot layer built on top of `orbit-rs`.
   It is a use-case crate, not part of the primitive core.
 

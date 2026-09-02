@@ -1,0 +1,26 @@
+[package]
+name = "orbit-cache"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-coherent local cache over Orbit shared-memory rings."
+license.workspace = true
+repository.workspace = true
+keywords = ["cache", "shm", "fleet", "orbit"]
+categories = ["caching", "concurrency"]
+
+[dependencies]
+bytes.workspace = true
+lru.workspace = true
+orbit-rs = { path = "../orbit-rs" }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+nix.workspace = true
+
+[[bench]]
+name = "multi_writer"
+harness = false

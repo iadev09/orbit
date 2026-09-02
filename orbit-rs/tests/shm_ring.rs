@@ -225,3 +225,45 @@ fn shared_ordered_serializes_independent_writer_handles() {
 
     first.unlink().unwrap();
 }
+
+#[test]
+fn per_node_batch_is_contiguous_and_addressable() {
+    let name = fresh_name();
+    let ring_spec = RingSpec::per_node(4, 8);
+    let ring = ShmRing::open_or_create_for_fleet(&name, 17, ring_spec, 2).unwrap();
+    let ids = ring
+        .write_batch(
+            NodeId::new(1),
+            3,
+            99,
+            vec![
+                Bytes::from_static(b"aa"),
+                Bytes::from_static(b"bb"),
+                Bytes::from_static(b"cc"),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids[0].node(), 1);
+    assert_eq!(ids[0].counter(), 0);
+    assert_eq!(ids[2].counter(), 2);
+    assert_eq!(ring.lane_head(NodeId::new(1)), 3);
+    assert_eq!(&ring.read(ids[1]).expect("middle frame").payload[..], b"bb");
+
+    ring.unlink().unwrap();
+}
+
+#[test]
+fn attached_handles_share_one_semantic_version_counter() {
+    let name = fresh_name();
+    let ring_spec = RingSpec::per_node(4, 8);
+    let first = ShmRing::open_or_create_for_fleet(&name, 18, ring_spec, 2).unwrap();
+    let second = ShmRing::open_or_create_for_fleet(&name, 18, ring_spec, 2).unwrap();
+
+    assert_eq!(first.next_version(), 1);
+    assert_eq!(second.next_version(), 2);
+    assert_eq!(first.next_version(), 3);
+
+    first.unlink().unwrap();
+}

@@ -8,7 +8,7 @@ smoke:
     uname -a
     rustc --version
     cargo --version
-    cargo test -p orbit-rs --all-targets
+    cargo test --workspace --all-targets
 
 smoke-linux:
     test "$(uname -s)" = "Linux"
