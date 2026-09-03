@@ -15,7 +15,6 @@ documentation = "https://docs.rs/orbit-rs"
 dashmap.workspace = true
 tracing.workspace = true
 bytes.workspace = true
-bytemuck.workspace = true
 netid64.workspace = true
 
 [target.'cfg(unix)'.dependencies]

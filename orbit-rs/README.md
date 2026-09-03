@@ -4,7 +4,7 @@
 for recent facts shared by sibling processes.
 
 It provides type-keyed bounded rings, optional POSIX shared-memory backing,
-fleet membership, and a small reusable event substrate.
+fleet membership, cursor traversal, and native notification primitives.
 
 `orbit-rs` is framework-agnostic. Application lifecycle and runtime
 policy belong above this crate.
@@ -27,8 +27,8 @@ Ring / Frame
 netid64::NetId64
   runtime-bound id carried by every frame
 
-Substrates
-  event bus, typed POD values
+Semantic layers
+  orbit-cache, orbit-event, orbit-lock, orbit-metrics
 ```
 
 Frame identifiers come from the external
@@ -139,20 +139,10 @@ Every worker built from the same program must know the same `KIND` and
 `Fleet::publish::<WorkerLoad>` and `Fleet::read_head::<WorkerLoad>` meet
 on the same ring.
 
-`Orbital<T>` is the fixed-size value helper:
-
-```text
-T: OrbitTyped + bytemuck::Pod
-  -> Orbital<T>::store(value)
-  -> Fleet::publish::<T>
-  -> ring selected by T::KIND
-  -> Orbital<T>::load()
-  -> T
-```
-
-This path is for small structs whose byte layout is known and stable.
-Variable-length records use explicit encoders in layers such as cache,
-event, lock, and metrics.
+`OrbitTyped` selects the ring; it does not serialize application values.
+Semantic layers encode their own payloads before `Fleet::publish::<T>` and
+decode frames returned by the fleet. Cache, event, lock, and metrics therefore
+own their wire formats without a primitive-level serializer choice.
 
 ## Cache Layer
 
@@ -165,48 +155,12 @@ addressable payload rings.
 primitive crate independent of cache eviction, TTL, resynchronization, and
 payload-retention policy.
 
-## Event Bus
+## Event Layer
 
-`OrbitEventBus` is an append-only event stream over one Orbit SHM segment
-with one writer lane per fleet node.
-Events are not cache entries and not metrics snapshots:
-
-```text
-cache   asks: what is the newest value for this key?
-metrics asks: what is the newest sample for each node/key?
-events  ask: which frames appeared since my cursor?
-```
-
-All topics deliberately share the same segment. The topic is carried
-inside the frame payload, so adding a new event type does not allocate
-another shared-memory segment. Subscribers keep one cursor per node lane;
-there is no total order across producing nodes.
-
-Each subscriber owns its own cursor. Polling advances that cursor across
-all frames, including frames later filtered out by topic. If a subscriber
-falls behind the fixed ring window, the poll result reports lag.
-
-```text
-OrbitEventBus::publish(topic, payload)
-  -> topic/payload/timestamp frame
-  -> publisher's node lane
-  -> OrbitEventCursor
-  -> poll() / poll_topic()
-```
-
-On Linux and FreeBSD, an SHM-backed event bus can also create a process-local
-`RingEventFd`. A committed publish increments a shared generation and wakes
-every listener through Linux futex or FreeBSD umtx. Each listener converts that
-broadcast into readiness on its own native eventfd, which can be registered
-with epoll/kqueue or an async runtime. The fd contains no event data and is not
-a delivery counter: consumers drain it, then bulk-poll the ring with their own
-cursor. Several publishes may coalesce into one readiness wake without losing
-resident ring frames.
-
-The eventfd is deliberately not shared between fleet processes. Eventfd reads
-consume its counter, which would turn a shared descriptor into load-balancing
-rather than broadcast delivery. Other Unix targets continue to use
-caller-owned polling until they gain a native notification backend.
+Topic framing, event cursors, and event bus semantics live in the separate
+[`orbit-event`](../orbit-event/README.md) crate. `orbit-rs` exposes the per-node
+ring traversal and notification primitives that support it without knowing
+about topics or application events.
 
 Run the Linux suite natively on an Apple Silicon development host with:
 
@@ -227,8 +181,8 @@ Both commands delegate to `just smoke`. Gitea Actions targets the native Rust
 runner registered by each Gitea instance and runs that shared recipe on every
 push.
 
-Typed dispatch, application lifecycle hooks, acknowledgements, durable
-replay, and consumer groups belong above this primitive.
+Typed dispatch, application lifecycle hooks, acknowledgements, durable replay,
+and consumer groups belong above the primitive and raw event layers.
 
 ## Dependency Boundary
 

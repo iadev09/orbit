@@ -16,20 +16,6 @@ pub enum Error {
     /// A node id must address one of the fleet's declared member slots.
     NodeOutsideFleet { node_id: u16, fleet_size: u8 },
 
-    /// A cache frame could not fit into the current ring payload.
-    CacheFrameTooLarge {
-        key_len: usize,
-        value_len: usize,
-        max_payload: usize,
-    },
-
-    /// An event frame could not fit into the current ring payload.
-    EventFrameTooLarge {
-        topic_len: usize,
-        payload_len: usize,
-        max_payload: usize,
-    },
-
     /// Shared-memory operation failed.
     Io(std::io::Error),
 }
@@ -47,26 +33,6 @@ impl fmt::Display for Error {
                 node_id,
                 fleet_size,
             } => write!(f, "node_id {node_id} is outside fleet_size {fleet_size}"),
-            Self::CacheFrameTooLarge {
-                key_len,
-                value_len,
-                max_payload,
-            } => {
-                write!(
-                    f,
-                    "orbit cache frame too large: key_len={key_len} value_len={value_len} max_payload={max_payload}"
-                )
-            }
-            Self::EventFrameTooLarge {
-                topic_len,
-                payload_len,
-                max_payload,
-            } => {
-                write!(
-                    f,
-                    "orbit event frame too large: topic_len={topic_len} payload_len={payload_len} max_payload={max_payload}"
-                )
-            }
             Self::Io(err) => write!(f, "orbit io error: {err}"),
         }
     }

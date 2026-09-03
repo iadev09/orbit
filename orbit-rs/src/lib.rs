@@ -16,9 +16,7 @@
 
 pub mod epoch;
 pub mod error;
-pub mod event;
 pub mod fleet;
-pub mod orbital;
 pub mod ring;
 #[cfg(unix)]
 pub mod shm;
@@ -37,13 +35,8 @@ pub mod ring_shm {
 
 pub use epoch::OrbitEpoch;
 pub use error::{Error, Result};
-pub use event::{
-    EVENT_PAYLOAD_MAX, EVENT_RING_KIND, EVENT_RING_SPEC, OrbitEvent, OrbitEventBus,
-    OrbitEventCursor, OrbitEventPoll,
-};
 pub use fleet::{Fleet, NodeId};
 pub use id::{NetId64, ParseNetId64Error};
-pub use orbital::Orbital;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use ring::RingEventFd;
 pub use ring::cursor::{RingCursor, RingFrameSource, RingLoss, RingPoll, RingRead, poll_ring};

@@ -1,26 +1,33 @@
-//! Cross-process Orbital<T> via Fleet::join_shm.
+//! Cross-process typed ring access via Fleet::join_shm.
 //!
 //! Validates that the Fleet integration of ShmRing actually carries
-//! typed values across `fork()`-spawned peers. This is the
-//! end-to-end V1 promise: declare a type, publish from one process,
-//! read from another, no special wiring.
+//! semantic payloads across `fork()`-spawned peers.
 
 #![cfg(unix)]
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytemuck::{Pod, Zeroable};
+use bytes::Bytes;
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
-use orbit_rs::{Fleet, OrbitTyped, Orbital, RingSpec};
+use orbit_rs::{Fleet, NetId64, OrbitTyped, RingSpec};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CrossCounter(pub u64);
 impl OrbitTyped for CrossCounter {
     const KIND: u8 = 41;
-    const RING_SPEC: RingSpec = RingSpec::new(16, std::mem::size_of::<CrossCounter>());
+    const RING_SPEC: RingSpec = RingSpec::new(16, size_of::<u64>());
+}
+
+fn publish_counter(fleet: &Fleet, value: CrossCounter) -> NetId64 {
+    fleet.publish::<CrossCounter>(0, 0, Bytes::copy_from_slice(&value.0.to_le_bytes()))
+}
+
+fn load_counter(fleet: &Fleet) -> Option<CrossCounter> {
+    let frame = fleet.read_head::<CrossCounter>()?;
+    let bytes = <[u8; size_of::<u64>()]>::try_from(frame.payload.as_ref()).ok()?;
+    Some(CrossCounter(u64::from_le_bytes(bytes)))
 }
 
 fn fresh_name() -> &'static str {
@@ -63,14 +70,13 @@ fn wait_child(pid: nix::unistd::Pid) -> i32 {
 }
 
 #[test]
-fn parent_publishes_via_orbital_child_loads() {
+fn parent_publishes_child_loads() {
     let name = fresh_name();
 
     let fleet = Arc::new(Fleet::join_shm(name, 4).expect("parent join_shm"));
     assert!(fleet.is_shm());
 
-    let counter = Orbital::<CrossCounter>::new(fleet.clone());
-    counter.store(CrossCounter(0xCAFE_F00D));
+    publish_counter(&fleet, CrossCounter(0xCAFE_F00D));
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Parent { child } => {
@@ -87,8 +93,7 @@ fn parent_publishes_via_orbital_child_loads() {
                 Ok(f) => Arc::new(f),
                 Err(_) => std::process::exit(41),
             };
-            let child_counter = Orbital::<CrossCounter>::new(child_fleet);
-            match child_counter.load() {
+            match load_counter(&child_fleet) {
                 Some(v) if v.0 == 0xCAFE_F00D => std::process::exit(0),
                 Some(other) => {
                     eprintln!("child loaded unexpected value: {:#x}", other.0);
@@ -111,8 +116,7 @@ fn child_publishes_parent_loads() {
         ForkResult::Parent { child } => {
             let code = wait_child(child);
             // After child writes and exits, parent reads.
-            let counter = Orbital::<CrossCounter>::new(fleet.clone());
-            let observed = counter.load();
+            let observed = load_counter(&fleet);
             if let Ok(ring) = fleet.shm_ring::<CrossCounter>() {
                 let _ = ring.unlink();
             }
@@ -128,8 +132,7 @@ fn child_publishes_parent_loads() {
                 Ok(f) => Arc::new(f),
                 Err(_) => std::process::exit(51),
             };
-            let child_counter = Orbital::<CrossCounter>::new(child_fleet);
-            child_counter.store(CrossCounter(0xDEAD_BEEF));
+            publish_counter(&child_fleet, CrossCounter(0xDEAD_BEEF));
             std::process::exit(0);
         }
     }

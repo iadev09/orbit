@@ -15,12 +15,50 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::error::{Error, Result};
-use crate::fleet::{Fleet, FleetLaneCursor, NodeId};
-use crate::id::NetId64;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use crate::ring::RingEventFd;
-use crate::{OrbitTyped, RingSpec};
+use orbit_rs::RingEventFd;
+use orbit_rs::fleet::FleetLaneCursor;
+use orbit_rs::{Fleet, NetId64, NodeId, OrbitTyped, RingSpec};
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Failures produced by the Orbit event semantic layer.
+#[derive(Debug)]
+pub enum Error {
+    /// A topic and payload envelope cannot fit in one configured event frame.
+    FrameTooLarge {
+        topic_len: usize,
+        payload_len: usize,
+        max_payload: usize,
+    },
+    /// The underlying Orbit ring operation failed.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FrameTooLarge {
+                topic_len,
+                payload_len,
+                max_payload,
+            } => write!(
+                f,
+                "orbit event frame too large: topic_len={topic_len} payload_len={payload_len} max_payload={max_payload}"
+            ),
+            Self::Io(error) => write!(f, "orbit event io error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::FrameTooLarge { .. } => None,
+        }
+    }
+}
 
 /// Event frame payload limit for V0. This is the event lane's own SHM
 /// payload capacity; non-Unix keeps the same contract so callers do not
@@ -216,7 +254,7 @@ fn encode_frame(topic: &[u8], payload: &[u8], timestamp_ms: u64) -> Result<Bytes
         || payload.len() > u16::MAX as usize
         || total > EVENT_PAYLOAD_MAX
     {
-        return Err(Error::EventFrameTooLarge {
+        return Err(Error::FrameTooLarge {
             topic_len: topic.len(),
             payload_len: payload.len(),
             max_payload: EVENT_PAYLOAD_MAX,
@@ -266,7 +304,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::OrbitEventBus;
-    use crate::Fleet;
+    use orbit_rs::Fleet;
 
     #[test]
     fn polls_events_since_cursor() {

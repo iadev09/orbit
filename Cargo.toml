@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "orbit-cache",
+    "orbit-event",
     "orbit-lock",
     "orbit-rs",
     "orbit-metrics",
@@ -14,7 +15,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/iadev09/orbit"
 
 [workspace.dependencies]
-bytemuck = { version = "1.23", features = ["derive"] }
 bytes = "1.11"
 criterion = "0.8.2"
 dashmap = "6.1"

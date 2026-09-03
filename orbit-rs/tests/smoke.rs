@@ -3,11 +3,8 @@
 //! V0 is in-process only, so "fleet" here is a single member. Real
 //! cross-process behavior arrives with V1 + SHM.
 
-use std::sync::Arc;
-
-use bytemuck::{Pod, Zeroable};
 use bytes::Bytes;
-use orbit_rs::{Fleet, NetId64, NodeId, OrbitTyped, Orbital, RingSpec};
+use orbit_rs::{Fleet, NetId64, NodeId, OrbitTyped, RingSpec};
 
 #[test]
 fn empty_fleet_rejected() {
@@ -199,85 +196,4 @@ fn ring_read_head_returns_latest_frame() {
     let head_frame = ring.read_head().expect("ring has head after writes");
     assert_eq!(head_frame.id, last_id);
     assert_eq!(&head_frame.payload[..], b"second");
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Orbital<T> — typed wrapper, the most primitive demo
-// ─────────────────────────────────────────────────────────────────────
-
-/// Smallest meaningful Orbit-aware variable. Just a wrapped `u32`,
-/// chosen because it's the most primitive shape we can put through
-/// the fleet end-to-end. Real consumer code can wrap this in a typed
-/// store API; this lives in tests only as a fixture.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
-struct SimpleCounter(pub u32);
-
-impl OrbitTyped for SimpleCounter {
-    const KIND: u8 = 11;
-    const RING_SPEC: RingSpec = RingSpec::new(1024, std::mem::size_of::<SimpleCounter>());
-}
-
-#[test]
-fn orbital_simple_counter_roundtrip() {
-    let fleet = Arc::new(Fleet::join("test", 1).unwrap());
-    let counter = Orbital::<SimpleCounter>::new(fleet);
-
-    assert!(counter.load().is_none(), "no value before first store");
-
-    counter.store(SimpleCounter(42));
-    assert_eq!(counter.load(), Some(SimpleCounter(42)));
-
-    counter.store(SimpleCounter(99));
-    assert_eq!(counter.load(), Some(SimpleCounter(99)));
-}
-
-#[test]
-fn orbital_store_returns_addressable_id() {
-    let fleet = Arc::new(Fleet::join("test", 1).unwrap());
-    let counter = Orbital::<SimpleCounter>::new(fleet);
-
-    let id_a = counter.store(SimpleCounter(7));
-    let id_b = counter.store(SimpleCounter(8));
-
-    // id is fleet-aware: KIND from SimpleCounter::KIND, NODE from fleet, COUNTER monotonic
-    assert_eq!(id_a.kind(), SimpleCounter::KIND);
-    assert_eq!(id_b.kind(), SimpleCounter::KIND);
-    assert_eq!(id_b.counter(), id_a.counter() + 1);
-
-    // Both still readable while the ring hasn't wrapped.
-    assert_eq!(counter.load_by_id(id_a), Some(SimpleCounter(7)));
-    assert_eq!(counter.load_by_id(id_b), Some(SimpleCounter(8)));
-}
-
-#[test]
-fn orbital_handles_for_same_type_share_state() {
-    let fleet = Arc::new(Fleet::join("test", 1).unwrap());
-    let writer = Orbital::<SimpleCounter>::new(fleet.clone());
-    let reader = Orbital::<SimpleCounter>::new(fleet);
-
-    writer.store(SimpleCounter(1234));
-    // reader is a different handle but reads the same fleet ring
-    assert_eq!(reader.load(), Some(SimpleCounter(1234)));
-}
-
-#[test]
-fn orbital_distinct_types_independent() {
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
-    struct OtherValue(pub u32);
-    impl OrbitTyped for OtherValue {
-        const KIND: u8 = 12;
-        const RING_SPEC: RingSpec = RingSpec::new(1024, std::mem::size_of::<OtherValue>());
-    }
-
-    let fleet = Arc::new(Fleet::join("test", 1).unwrap());
-    let counter = Orbital::<SimpleCounter>::new(fleet.clone());
-    let other = Orbital::<OtherValue>::new(fleet);
-
-    counter.store(SimpleCounter(100));
-    other.store(OtherValue(200));
-
-    assert_eq!(counter.load(), Some(SimpleCounter(100)));
-    assert_eq!(other.load(), Some(OtherValue(200)));
 }

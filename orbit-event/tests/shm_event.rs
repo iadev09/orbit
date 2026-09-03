@@ -18,8 +18,9 @@ use std::os::unix::net::UnixStream;
 
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{ForkResult, fork};
+use orbit_event::{EVENT_RING_KIND, EVENT_RING_SPEC, OrbitEventBus};
 use orbit_rs::ring_shm::ShmRing;
-use orbit_rs::{EVENT_RING_KIND, EVENT_RING_SPEC, Fleet, NodeId, OrbitEventBus};
+use orbit_rs::{Fleet, NodeId};
 
 fn fresh_name() -> &'static str {
     use std::sync::atomic::{AtomicU64, Ordering};
