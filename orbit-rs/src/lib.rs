@@ -20,7 +20,6 @@ pub mod event;
 pub mod fleet;
 pub mod orbital;
 pub mod ring;
-pub mod rpc;
 #[cfg(unix)]
 pub mod shm;
 

@@ -4,7 +4,7 @@
 for recent facts shared by sibling processes.
 
 It provides type-keyed bounded rings, optional POSIX shared-memory backing,
-fleet membership, and small reusable substrates for events and RPC.
+fleet membership, and a small reusable event substrate.
 
 `orbit-rs` is framework-agnostic. Application lifecycle and runtime
 policy belong above this crate.
@@ -28,7 +28,7 @@ netid64::NetId64
   runtime-bound id carried by every frame
 
 Substrates
-  event bus, RPC, typed POD values
+  event bus, typed POD values
 ```
 
 Frame identifiers come from the external
@@ -229,20 +229,6 @@ push.
 
 Typed dispatch, application lifecycle hooks, acknowledgements, durable
 replay, and consumer groups belong above this primitive.
-
-## RPC
-
-`rpc::Lane` declares one request segment and one reply segment for an RPC
-domain. Each segment contains one writer lane per fleet node. Individual
-request and reply messages are carried as method plus payload bytes; they
-do not implement `OrbitTyped` and do not allocate their own SHM segments.
-
-`rpc::Client::send(...).await` completes from the reply correlated by
-the request frame's `NetId64` and the addressed node. Orbit does not
-start a hidden thread or choose an async runtime: the embedding runtime
-owns one reply-polling task and drives `rpc::Client::poll_replies`.
-Handler registration, codecs, timeouts, retries, and authorization
-remain adapter policy.
 
 ## Dependency Boundary
 

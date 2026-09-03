@@ -31,7 +31,7 @@ Typical use cases:
 ## Crates
 
 - `orbit-rs`: the substrate layer. It owns fleet membership, type-keyed rings,
-  POSIX shared-memory backing, event/RPC substrates, notification bridges,
+  POSIX shared-memory backing, event streams, notification bridges,
   batch publication, and cursor/loss accounting.
 - [`orbit-cache`](orbit-cache/README.md): a fleet-coherent local byte cache
   built from a dedicated mutation ring and addressable multi-slot payload
