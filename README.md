@@ -24,19 +24,20 @@ Typical use cases:
 - process fleet heartbeats;
 - small runtime cache facts;
 - local event streams;
-- contest/claim coordination for duplicate work;
+- keyed lease locks for duplicate work;
 - metrics snapshots collected from multiple workers;
 - compact counters and lease/lock metadata.
 
 ## Crates
 
-- `orbit-rs`: the primitive layer. It owns fleet membership,
-  type-keyed rings, the Contest current-state table, POSIX shared-memory
-  backing, event/RPC substrates, notification bridges, batch publication,
-  and cursor/loss accounting.
+- `orbit-rs`: the substrate layer. It owns fleet membership, type-keyed rings,
+  POSIX shared-memory backing, event/RPC substrates, notification bridges,
+  batch publication, and cursor/loss accounting.
 - [`orbit-cache`](orbit-cache/README.md): a fleet-coherent local byte cache
   built from a dedicated mutation ring and addressable multi-slot payload
   ring.
+- [`orbit-lock`](orbit-lock/README.md): fleet-shared keyed locks backed by an
+  authoritative current-state table and a notified transition ring.
 - `orbit-metrics`: a metrics snapshot layer built on top of `orbit-rs`.
   It is a use-case crate, not part of the primitive core.
 

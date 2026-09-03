@@ -16,10 +16,11 @@ The crate owns:
 - bounded process-local L1 state,
 - detection of mutation lag and overwritten payloads.
 
-It does not own application configuration, provider registration, PHP/JSON
-value envelopes, Redis/file drivers, a durable backing store, or an async
-runtime. Embedders drive `Cache::poll` after waiting on the mutation ring's
-readiness fd, or on a fallback timer where native readiness is unavailable.
+It does not own application configuration, provider registration,
+application-specific value envelopes, concrete backing-store drivers, a
+durable backing store, or an async runtime. Embedders drive `Cache::poll`
+after waiting on the mutation ring's readiness fd, or on a fallback timer
+where native readiness is unavailable.
 
 The cache is process-local data with fleet-wide coherence. Shared memory is a
 bounded transport, not the authoritative cache heap:
@@ -107,8 +108,8 @@ not a database transaction sequence. Wall-clock milliseconds are used only
 for TTL expiry.
 
 An authoritative backing store may later supply a stronger version. That
-boundary belongs in this crate, while concrete Redis/file/application adapters
-belong above it.
+boundary belongs in this crate, while concrete storage and application
+adapters belong above it.
 
 ## Layout
 

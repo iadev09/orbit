@@ -28,10 +28,10 @@ copy them into their own L1.
   payloads;
 - native mutation readiness on Linux and FreeBSD.
 
-It does not provide persistence, serialization, Redis/file drivers, an async
-runtime, or an authoritative source of truth. It also does not implement
-increment/decrement or leases; those belong to Orbit state and coordination
-primitives.
+It does not provide persistence, serialization, concrete backing-store
+drivers, an async runtime, or an authoritative source of truth. It also does
+not implement increment/decrement or leases; those belong to Orbit state and
+coordination primitives.
 
 ## Basic Use
 

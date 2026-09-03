@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "orbit-cache",
+    "orbit-lock",
     "orbit-rs",
     "orbit-metrics",
 ]

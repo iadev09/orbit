@@ -8,7 +8,6 @@ use bytes::Bytes;
 use dashmap::DashMap;
 
 use crate::OrbitTyped;
-use crate::contest::state::ContestStateStore;
 use crate::error::{Error, Result};
 use crate::id::NetId64;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -67,10 +66,6 @@ struct FleetInner {
     /// in-process for unit-test / single-process use, or POSIX SHM
     /// for real cross-process visibility (V1, master+worker fleet).
     backing: RingBacking,
-    /// Fleet-wide current lease state used by Contest. This is deliberately
-    /// separate from append-only rings: a renewed lease must not disappear
-    /// because unrelated history wrapped.
-    contest_state: ContestStateStore,
 }
 
 /// Backing storage for the fleet's ring buffers — chosen at
@@ -114,7 +109,6 @@ impl Fleet {
                 node_id,
                 id_counters: DashMap::new(),
                 backing: RingBacking::InMemory(RingRegistry::new(fleet_size)),
-                contest_state: ContestStateStore::in_memory(),
             }),
         })
     }
@@ -158,7 +152,6 @@ impl Fleet {
                 node_id,
                 id_counters: DashMap::new(),
                 backing: RingBacking::Shm(ShmRingRegistry::new(name, fleet_size)),
-                contest_state: ContestStateStore::shm(name),
             }),
         })
     }
@@ -173,10 +166,6 @@ impl Fleet {
 
     pub fn node_id(&self) -> NodeId {
         self.inner.node_id
-    }
-
-    pub(crate) fn contest_state(&self) -> &ContestStateStore {
-        &self.inner.contest_state
     }
 
     /// Mint a fresh fleet-unique [`NetId64`] for type `T` *without*

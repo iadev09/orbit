@@ -1,0 +1,23 @@
+[package]
+name = "orbit-lock"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description = "Fleet-shared keyed locks over Orbit shared memory."
+license.workspace = true
+repository.workspace = true
+keywords = ["lock", "shm", "fleet", "orbit"]
+categories = ["concurrency"]
+
+[dependencies]
+bytes.workspace = true
+orbit-rs = { path = "../orbit-rs" }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+nix.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

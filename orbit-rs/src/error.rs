@@ -3,8 +3,6 @@
 
 use std::fmt;
 
-use crate::id::NetId64;
-
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug)]
@@ -31,22 +29,6 @@ pub enum Error {
         payload_len: usize,
         max_payload: usize,
     },
-
-    /// A contest entry could not fit into one current-state slot.
-    ContestEntryTooLarge {
-        subject_len: usize,
-        owner_len: usize,
-        max_payload: usize,
-    },
-
-    /// Every Contest state-table slot currently carries a live subject.
-    ContestStateFull { capacity: usize },
-
-    /// A guard attempted to renew a lease that expired or was superseded.
-    ContestLeaseLost { claim_id: NetId64 },
-
-    /// The 40-bit Contest claim counter cannot mint another fencing token.
-    ContestIdExhausted,
 
     /// An RPC request or reply could not fit into its lane payload.
     RpcFrameTooLarge {
@@ -92,25 +74,6 @@ impl fmt::Display for Error {
                     f,
                     "orbit event frame too large: topic_len={topic_len} payload_len={payload_len} max_payload={max_payload}"
                 )
-            }
-            Self::ContestEntryTooLarge {
-                subject_len,
-                owner_len,
-                max_payload,
-            } => {
-                write!(
-                    f,
-                    "orbit contest entry too large: subject_len={subject_len} owner_len={owner_len} max_payload={max_payload}"
-                )
-            }
-            Self::ContestStateFull { capacity } => {
-                write!(f, "orbit contest state table is full: capacity={capacity}")
-            }
-            Self::ContestLeaseLost { claim_id } => {
-                write!(f, "orbit contest lease {claim_id} is no longer active")
-            }
-            Self::ContestIdExhausted => {
-                f.write_str("orbit contest exhausted its 40-bit claim counter")
             }
             Self::RpcFrameTooLarge {
                 frame,

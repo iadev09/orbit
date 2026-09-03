@@ -3,9 +3,8 @@
 `orbit-rs` is the primitive Orbit crate: a same-host runtime substrate
 for recent facts shared by sibling processes.
 
-It provides type-keyed bounded rings, a bounded current-state table for
-Contest leases, optional POSIX shared-memory backing, fleet membership,
-and small reusable substrates for events and RPC.
+It provides type-keyed bounded rings, optional POSIX shared-memory backing,
+fleet membership, and small reusable substrates for events and RPC.
 
 `orbit-rs` is framework-agnostic. Application lifecycle and runtime
 policy belong above this crate.
@@ -25,14 +24,11 @@ OrbitTyped
 Ring / Frame
   fixed-capacity append surface with bounded payloads
 
-Contest state
-  fixed-capacity current lease table keyed by typed subject
-
 netid64::NetId64
   runtime-bound id carried by every frame
 
 Substrates
-  event bus, RPC, contest, typed POD values
+  event bus, RPC, typed POD values
 ```
 
 Frame identifiers come from the external
@@ -55,7 +51,7 @@ Fleet::join_shm(...)
 A fleet has a name, a `NodeId`, an expected fleet size, and shared
 surface registries. Every `OrbitTyped::KIND` maps to its own ring and
 declares its own `RingSpec { capacity, payload_capacity, topology }`.
-Contest uses one separate fleet-scoped state surface. Role hierarchy is
+Role hierarchy is
 outside the crate: master, worker, standalone process, or sibling tool
 can all join the same fleet if the embedder gives them compatible
 configuration.
@@ -156,7 +152,7 @@ T: OrbitTyped + bytemuck::Pod
 
 This path is for small structs whose byte layout is known and stable.
 Variable-length records use explicit encoders in layers such as cache,
-event, contest, and metrics.
+event, lock, and metrics.
 
 ## Cache Layer
 
@@ -233,41 +229,6 @@ push.
 
 Typed dispatch, application lifecycle hooks, acknowledgements, durable
 replay, and consumer groups belong above this primitive.
-
-## Contest
-
-`Contest` is not a race primitive. It turns simultaneous interest in the
-same typed subject into a small claim/yield protocol.
-
-```text
-claim typed subject
-  -> hash directly to its current state slot
-  -> free/expired subject receives Guard
-  -> active subject returns YieldTo(holder)
-  -> renew updates the same slot
-  -> dropping Guard tombstones the matching slot
-```
-
-Contest uses one fixed-capacity, open-addressed current-state table. A
-claim, renewal, or release takes a short process-recoverable lock and
-touches the subject's probe chain; the lock is not held while the winner
-performs guarded work. Operations do not scan or reconstruct ring history.
-
-`CONTEST_STATE_CAPACITY` is the maximum number of simultaneously resident
-subjects, not a history length. Renewing a long-lived lease keeps the same
-claim id and fencing token even if arbitrarily many unrelated subjects are
-claimed and released. A full table fails explicitly instead of evicting a
-live lease.
-
-A subject is a caller-defined `ContestType::KIND` plus a label. The
-owner label is only for observation; Orbit does not interpret it.
-
-The important bias is that followers yield. Orbit does not serialize a
-queue or make the holder faster. It lets one peer carry a typed subject
-while others can observe who carries it and back off.
-
-TTL handles abandoned claims. Releasing is tied to the `Guard` lifetime,
-so normal Rust scope becomes the release boundary for successful work.
 
 ## RPC
 

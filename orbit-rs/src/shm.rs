@@ -75,10 +75,7 @@ impl ShmRegion {
     /// Open or create a region while holding its process lock through caller
     /// initialization. This prevents a peer from observing the interval
     /// between `shm_open` and the owning data structure's initialized header.
-    pub(crate) fn open_or_create_locked(
-        name: &str,
-        size: usize,
-    ) -> io::Result<(Self, ShmRegionLock)> {
+    pub fn open_or_create_locked(name: &str, size: usize) -> io::Result<(Self, ShmRegionLock)> {
         let (region, initialization_lock) = Self::open_or_create_inner(name, size, true)?;
         Ok((
             region,
@@ -226,7 +223,7 @@ impl ShmRegion {
     ///
     /// `flock` ownership is held by the kernel and is released when a process
     /// exits or the descriptor closes, including abnormal termination.
-    pub(crate) fn lock_exclusive(&self) -> io::Result<ShmRegionLock> {
+    pub fn lock_exclusive(&self) -> io::Result<ShmRegionLock> {
         if !self.process_lock {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -282,7 +279,11 @@ impl ShmRegion {
     }
 }
 
-pub(crate) struct ShmRegionLock {
+/// RAII guard for a [`ShmRegion`]'s process-recoverable exclusive lock.
+///
+/// Semantic crates use this when a current-state transition must be atomic
+/// across fleet processes. Dropping the guard releases the kernel lock.
+pub struct ShmRegionLock {
     lock_fd: OwnedFd,
 }
 
