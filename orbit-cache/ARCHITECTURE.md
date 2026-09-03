@@ -1,9 +1,10 @@
 # orbit-cache - Architecture
 
 `orbit-cache` is a framework-neutral, fleet-coherent byte cache built on
-`orbit-rs`. Each process keeps the values it serves in a bounded local L1.
-Orbit rings distribute mutations and temporarily carry newly stored value
-bytes between peers.
+`orbit-rs`. Each process opens one physical cache connection and may register
+multiple named logical stores on it. Every store keeps the values it serves in
+an independent bounded local L1. Orbit rings distribute addressed mutations
+and temporarily carry newly stored value bytes between peers.
 
 ## Role
 
@@ -13,7 +14,7 @@ The crate owns:
 - a dedicated notified mutation ring,
 - a separate addressable payload ring,
 - caller-owned mutation cursors,
-- bounded process-local L1 state,
+- named logical stores with independent bounded process-local L1 state,
 - detection of mutation lag and overwritten payloads.
 
 It does not own application configuration, provider registration,
@@ -26,10 +27,10 @@ The cache is process-local data with fleet-wide coherence. Shared memory is a
 bounded transport, not the authoritative cache heap:
 
 ```text
-authoritative source / optional L2
-              |
-              v
-       process-local L1 <--- cache mutations --- sibling processes
+authoritative source / optional per-store L2
+                    |
+                    v
+       named process-local L1 <--- cache mutations --- sibling processes
 ```
 
 A process exit discards that process' L1. A new process starts empty and
@@ -43,7 +44,7 @@ Every cache mutation is published to the mutation ring. `Put` carries a
 
 ```text
 payload ring:   [chunk 0][chunk 1]... -> PayloadRef
-mutation ring:  Put { key, expiry, PayloadRef }
+mutation ring:  Put { store, key, expiry, PayloadRef }
 ```
 
 The payload ring is not a second event stream and readers never merge its
@@ -54,6 +55,26 @@ semantic revision order and looks up payload chunks directly by their
 
 Payload frames are deliberately not notification-enabled. Only a committed
 mutation can make their bytes relevant to readers.
+
+## Connection and Logical Stores
+
+`Cache` represents one physical connection: one mutation ring, one payload
+ring, one cursor, and one readiness source per process. `Cache::open_store`
+returns a named `Store`. Store names are part of every mutation address, so
+`models/42` and `responses/42` are unrelated entries even though both use the
+same physical rings.
+
+Every `Store` owns its own `LocalCache` and may use a different L1 capacity or
+backing store in the embedding layer. Opening a name again within the same
+process returns a handle to the existing L1; its first registered capacity
+wins. The store registry must be established before the inbound driver starts
+so configuration is consistent across peers.
+
+One connection means one shared lag boundary. If ring loss makes the missing
+mutation's store unknowable, every registered store becomes
+`ResyncRequired`; the embedding layer recovers each from its own backing.
+Unknown store mutations are reported and ignored rather than being inserted
+into another store.
 
 ## Local L1
 
@@ -69,16 +90,18 @@ older mutations may then be ignored. Ignoring an old mutation can cost a hit,
 but must never serve stale bytes.
 
 If a referenced payload has already been overwritten, the key becomes a local
-miss and is returned in `CachePoll::payload_unavailable`. The higher layer may
-recover that key from its authoritative source or L2.
+miss and its `(store, key)` address is returned in
+`CachePoll::payload_unavailable`. The higher layer may recover that entry from
+the store's authoritative source or L2.
 
 If the mutation cursor reports lost or malformed frames, the L1 clears all
 values and becomes `ResyncRequired`. A backing-store adapter may call
-`Cache::recover_from_backing`: the cursor moves to the current lane heads, the
-L1 becomes an empty coherent cache, and ordinary misses fall through to the
-backing store. The recovery boundary also records the current shared mutation
-sequence, so an older writer that commits late cannot repopulate stale bytes.
-Without a backing store the caller must leave the cache in
+`Cache::recover_from_backing`: the shared cursor moves to the current lane
+heads, every registered L1 becomes an empty coherent cache, and ordinary
+misses fall through to the relevant backing store. The recovery boundary also
+records the current shared mutation sequence, so an older writer that commits
+late cannot repopulate stale bytes. Without backing stores the caller must
+leave the cache in
 `ResyncRequired` rather than silently accepting an incomplete view.
 
 ## Revisions
@@ -134,12 +157,16 @@ The default layout is:
 | --- | --- | ---: | ---: |
 | Mutation ring | per node | 1,024 | 1,024 bytes |
 | Payload ring | per node | 1,024 | 4,096 bytes |
-| Local L1 | per process | 10,000 entries | variable |
+| Local L1 | per logical store and process | 10,000 entries | variable |
 
-With the default protocol header, the largest key is 985 bytes. The hard value
+With the default protocol header, store name and key share 983 bytes. For the
+seven-byte `default` store name, the largest key is 976 bytes. The hard value
 limit is 4 MiB because one value may occupy at most the complete payload lane.
-That is a validity bound, not a recommended object size: a 4 MiB write consumes
-the lane's entire retained payload window.
+That is a validity bound, not a recommended object size: a 4 MiB write
+consumes the lane's entire retained payload window.
+
+Store names and keys must both be non-empty. A store name may use at most 982
+of the shared bytes so every accepted store can still address a one-byte key.
 
 Ring capacity is not the number of cache keys. It is the burst window retained
 for a reader that has not yet consumed mutations or payload descriptors. The
@@ -147,18 +174,19 @@ number of resident keys is bounded independently by the process-local L1.
 
 ## Lifecycle and Driving
 
-`Cache::new` creates an empty coherent L1 and positions its cursor after all
-currently committed mutations. `Cache::replay_retained` starts at counter zero
-and replays only the history still present in the bounded rings.
+`Cache::new` creates a connection and positions its cursor after all currently
+committed mutations. `Cache::open_store` creates an empty coherent L1.
+`Cache::replay_retained` starts at counter zero and replays only the history
+still present in the bounded rings.
 
 `Cache::reset_transport` is the owner-controlled boot primitive. It resets both
-rings only while peers are quiescent, then realigns the calling handle's cursor
-and empty L1 with the new generation. Runtime cache clearing uses
-`Cache::reset`, which publishes an ordinary `Reset` mutation instead.
+rings only while peers are quiescent, then realigns the connection cursor and
+all registered L1s with the new generation. Runtime cache clearing uses
+`Store::reset`, which publishes a store-scoped `Reset` mutation instead.
 
-Publishing through `Cache::put`, `delete`, or `reset` applies the mutation to
-the publisher's L1 immediately. Other processes observe it when their owner
-drives `Cache::poll`.
+Publishing through `Store::put`, `delete`, or `reset` applies the mutation to
+that publisher store's L1 immediately. Other processes observe it when their
+owner drives the shared `Cache::poll`.
 
 On Linux and FreeBSD, `Cache::event_fd` creates a process-local readiness
 bridge for the mutation ring. Readiness means only that the ring changed;
@@ -166,9 +194,10 @@ consumers drain the fd and then call `Cache::poll`. Notifications may coalesce.
 The payload ring has no notification fd. Other targets use a caller-owned
 fallback interval.
 
-Clones of `Cache` share one L1 and one cursor. The embedding runtime should
-therefore create one cache handle per process cache domain and run one inbound
-poll driver for it.
+Clones of `Cache` share one store registry and one cursor. Clones of `Store`
+share that store's L1. The embedding runtime should therefore create one
+connection per process cache domain and run one inbound poll driver for it,
+not one driver per logical store.
 
 ## Invariants
 
@@ -180,7 +209,9 @@ poll driver for it.
 - Cache traffic never shares capacity or readiness with the generic Orbit
   event bus.
 - One cache mutation ring means one readiness listener per subscribing
-  process, not one listener per key or cache type.
+  process, not one listener per key or logical store.
+- Mutation identity is `(store, key)`; resets affect only their addressed
+  logical store.
 - L1 eviction may reduce hit rate but may not make stale bytes observable.
 - Lost or malformed mutations disable L1 hits until explicit resynchronization.
 - `increment`, `decrement`, and leases are not cache mutations; they belong to

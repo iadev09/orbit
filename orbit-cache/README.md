@@ -1,16 +1,17 @@
 # orbit-cache
 
-`orbit-cache` keeps a bounded byte cache in every process and propagates cache
-mutations between sibling processes through Orbit shared memory.
+`orbit-cache` keeps named, bounded byte-cache stores in every process and
+propagates cache mutations between sibling processes through one shared Orbit
+cache connection.
 
 It is intended for a same-host worker fleet where every worker should serve
 hot reads from its own RAM while observing `Put`, `Delete`, and `Reset`
 operations made by its peers.
 
 ```text
-worker 0 L1 --\
-worker 1 L1 ---- dedicated mutation ring + payload ring
-worker 2 L1 --/
+worker 0: models L1 + responses L1 --\
+worker 1: models L1 + responses L1 ---- one mutation ring + payload ring
+worker 2: models L1 + responses L1 --/
 ```
 
 The rings are transport. Values served by reads live in the process-local L1;
@@ -20,6 +21,7 @@ copy them into their own L1.
 ## What It Provides
 
 - a bounded process-local LRU cache;
+- multiple named stores with independent process-local L1s;
 - fleet-wide `Put`, `Delete`, and `Reset` propagation;
 - values split across consecutive payload slots;
 - deterministic last-write-wins ordering across writer lanes;
@@ -50,11 +52,12 @@ let fleet = Arc::new(Fleet::join_shm_as(
     3,
     NodeId::new(1),
 )?);
-let cache = Cache::with_default_capacity(fleet)?;
+let cache = Cache::new(fleet)?;
+let store = cache.open_default_store()?;
 
-cache.put(b"user:42", b"encoded value", Some(Duration::from_secs(60)))?;
+store.put(b"user:42", b"encoded value", Some(Duration::from_secs(60)))?;
 
-match cache.read(b"user:42") {
+match store.read(b"user:42") {
     CacheRead::Hit(entry) => assert_eq!(&entry.value[..], b"encoded value"),
     CacheRead::Miss => { /* recover from the authoritative source or L2 */ }
     CacheRead::ResyncRequired => { /* rebuild local coherence */ }
@@ -63,8 +66,9 @@ match cache.read(b"user:42") {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The publisher updates its own L1 immediately. Each sibling process must drive
-`cache.poll()` to apply remote mutations:
+The publisher updates that store's L1 immediately. Each sibling process must
+drive the connection's `cache.poll()` once to dispatch remote mutations to all
+registered stores:
 
 ```rust
 let result = cache.poll();
@@ -74,9 +78,9 @@ if result.resync_required {
     cache.recover_from_backing();
 }
 
-for key in result.payload_unavailable {
+for address in result.payload_unavailable {
     // This value left the bounded payload window before it was copied.
-    // Recover this key from the authoritative source or L2.
+    // Recover (address.store, address.key) from that store's backing.
 }
 ```
 
@@ -93,7 +97,7 @@ A `Put` is committed in this order:
 ```text
 1. Split and publish value bytes to the payload ring.
 2. Allocate a fleet-wide mutation sequence.
-3. Publish Put { key, TTL, PayloadRef } to the mutation ring.
+3. Publish Put { store, key, TTL, PayloadRef } to the mutation ring.
 4. Notify mutation-ring listeners.
 ```
 
@@ -110,14 +114,16 @@ the replacement frame as though it were the requested value.
 
 | Resource | Default |
 | --- | ---: |
-| Local L1 | 10,000 entries per process |
+| Local L1 | 10,000 entries per logical store and process |
 | Mutation ring kind | 200 |
 | Mutation retention | 1,024 frames per node lane |
 | Mutation slot payload | 1,024 bytes |
 | Payload ring kind | 201 |
 | Payload retention | 1,024 frames per node lane |
 | Payload slot bytes | 4,096 bytes |
-| Maximum key | 985 bytes |
+| Store name + key | 983 bytes |
+| Maximum store name | 982 bytes |
+| Maximum key in `default` store | 976 bytes |
 | Maximum value | 4 MiB |
 
 The 4 MiB value limit is the complete payload lane, not a recommended regular
@@ -126,7 +132,9 @@ window for its writer. Choose ring dimensions for expected value size,
 publication rate, reader latency, and fleet size.
 
 Ring capacity is not cache key capacity. The ring bounds how far a consumer may
-lag behind; the process-local L1 independently bounds how many keys remain hot.
+lag behind; each store's process-local L1 independently bounds how many keys
+remain hot. Store names are encoded separately from keys, so the same key may
+hold different values in different logical stores.
 
 ## Custom Layout
 

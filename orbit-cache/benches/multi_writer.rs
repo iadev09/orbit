@@ -52,14 +52,20 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
     let writers = fleets
         .iter()
         .map(|fleet| {
+            let cache = Cache::<DefaultCacheLayout>::new(fleet.clone())
+                .expect("create writer cache connection");
             Arc::new(
-                Cache::<DefaultCacheLayout>::new(fleet.clone(), l1_capacity)
-                    .expect("create writer cache"),
+                cache
+                    .open_store(b"default", l1_capacity)
+                    .expect("create writer store"),
             )
         })
         .collect::<Vec<_>>();
-    let observer = Cache::<DefaultCacheLayout>::new(fleets[0].clone(), l1_capacity)
-        .expect("create observer cache");
+    let observer_cache =
+        Cache::<DefaultCacheLayout>::new(fleets[0].clone()).expect("create observer cache");
+    let observer = observer_cache
+        .open_store(b"default", l1_capacity)
+        .expect("create observer store");
     let mutation_observer =
         CacheTransport::<DefaultCacheLayout>::new(fleets[0].clone()).expect("create observer");
     let mut mutation_cursor = mutation_observer.cursor_at_head();
@@ -119,7 +125,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
                     .read_payload(*payload)
                     .expect("newest payload must remain available");
 
-                let poll = observer.poll();
+                let poll = observer_cache.poll();
                 assert_eq!(poll.observed, WRITER_COUNT * WRITES_PER_WRITER);
                 assert_eq!(poll.applied, poll.observed);
                 assert_eq!(poll.ignored, 0);
@@ -140,7 +146,7 @@ fn multi_writer_same_key(criterion: &mut Criterion) {
     });
     group.finish();
 
-    observer
+    observer_cache
         .transport()
         .unlink_rings()
         .expect("unlink benchmark rings");

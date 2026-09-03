@@ -41,10 +41,18 @@ impl CacheMutationPoll {
 }
 
 /// Raw mutation and payload transport for one cache layout.
-#[derive(Clone)]
 pub struct CacheTransport<L: CacheLayout = crate::DefaultCacheLayout> {
     fleet: Arc<Fleet>,
     _layout: PhantomData<L>,
+}
+
+impl<L: CacheLayout> Clone for CacheTransport<L> {
+    fn clone(&self) -> Self {
+        Self {
+            fleet: self.fleet.clone(),
+            _layout: PhantomData,
+        }
+    }
 }
 
 impl<L: CacheLayout> CacheTransport<L> {
@@ -76,11 +84,12 @@ impl<L: CacheLayout> CacheTransport<L> {
     /// bytes visible to cache consumers.
     pub fn publish_put(
         &self,
+        store: &[u8],
         key: &[u8],
         value: &[u8],
         ttl: Option<Duration>,
     ) -> Result<CacheMutation> {
-        self.validate_put(key, value)?;
+        self.validate_put(store, key, value)?;
 
         let payload_version = self.fleet.next_ring_version::<PayloadRecord<L>>();
         let chunks = split_payload::<L>(value);
@@ -96,11 +105,12 @@ impl<L: CacheLayout> CacheTransport<L> {
             value_len: value.len() as u64,
         };
         let expires_at_ms = ttl.map(|ttl| now_ms().saturating_add(duration_ms(ttl)));
-        let encoded = protocol::encode_put::<L>(key, expires_at_ms, payload)?;
+        let encoded = protocol::encode_put::<L>(store, key, expires_at_ms, payload)?;
         let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
         let mutation_id = self.publish_mutation(FRAME_KIND_PUT, sequence, encoded)?;
 
         Ok(CacheMutation::Put {
+            store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
             revision: CacheRevision {
                 sequence,
@@ -111,12 +121,13 @@ impl<L: CacheLayout> CacheTransport<L> {
         })
     }
 
-    pub fn publish_delete(&self, key: &[u8]) -> Result<CacheMutation> {
-        self.validate_key(key)?;
-        let encoded = protocol::encode_delete::<L>(key)?;
+    pub fn publish_delete(&self, store: &[u8], key: &[u8]) -> Result<CacheMutation> {
+        self.validate_key(store, key)?;
+        let encoded = protocol::encode_delete::<L>(store, key)?;
         let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
         let mutation_id = self.publish_mutation(FRAME_KIND_DELETE, sequence, encoded)?;
         Ok(CacheMutation::Delete {
+            store: Bytes::copy_from_slice(store),
             key: Bytes::copy_from_slice(key),
             revision: CacheRevision {
                 sequence,
@@ -125,11 +136,16 @@ impl<L: CacheLayout> CacheTransport<L> {
         })
     }
 
-    pub fn publish_reset(&self) -> Result<CacheMutation> {
+    pub fn publish_reset(&self, store: &[u8]) -> Result<CacheMutation> {
+        self.validate_store(store)?;
         let sequence = self.fleet.next_ring_version::<MutationRecord<L>>();
-        let mutation_id =
-            self.publish_mutation(FRAME_KIND_RESET, sequence, protocol::encode_reset())?;
+        let mutation_id = self.publish_mutation(
+            FRAME_KIND_RESET,
+            sequence,
+            protocol::encode_reset::<L>(store)?,
+        )?;
         Ok(CacheMutation::Reset {
+            store: Bytes::copy_from_slice(store),
             revision: CacheRevision {
                 sequence,
                 mutation_id,
@@ -188,8 +204,12 @@ impl<L: CacheLayout> CacheTransport<L> {
         (value.len() == expected_len).then(|| Bytes::from(value))
     }
 
-    pub fn max_key_len(&self) -> usize {
-        protocol::max_key_len::<L>()
+    pub fn max_store_len(&self) -> usize {
+        protocol::max_store_len::<L>()
+    }
+
+    pub fn max_key_len(&self, store: &[u8]) -> usize {
+        protocol::max_key_len::<L>(store.len())
     }
 
     pub fn max_value_len(&self) -> usize {
@@ -198,9 +218,27 @@ impl<L: CacheLayout> CacheTransport<L> {
             .saturating_mul(L::PAYLOAD_RING_SPEC.payload_capacity)
     }
 
-    pub fn validate_key(&self, key: &[u8]) -> Result<()> {
-        let max = self.max_key_len();
-        if key.is_empty() || key.len() > max {
+    pub fn validate_store(&self, store: &[u8]) -> Result<()> {
+        if store.is_empty() {
+            return Err(Error::StoreEmpty);
+        }
+        let max = self.max_store_len();
+        if store.len() > max {
+            return Err(Error::StoreTooLarge {
+                store_len: store.len(),
+                max,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_key(&self, store: &[u8], key: &[u8]) -> Result<()> {
+        self.validate_store(store)?;
+        if key.is_empty() {
+            return Err(Error::KeyEmpty);
+        }
+        let max = self.max_key_len(store);
+        if key.len() > max {
             return Err(Error::KeyTooLarge {
                 key_len: key.len(),
                 max,
@@ -209,8 +247,8 @@ impl<L: CacheLayout> CacheTransport<L> {
         Ok(())
     }
 
-    pub fn validate_put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.validate_key(key)?;
+    pub fn validate_put(&self, store: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+        self.validate_key(store, key)?;
         let max = self.max_value_len();
         if value.len() > max {
             return Err(Error::ValueTooLarge {

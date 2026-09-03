@@ -171,6 +171,7 @@ impl LocalCache {
 
         match mutation {
             CacheMutation::Put {
+                store: _,
                 key,
                 revision,
                 expires_at_ms,
@@ -199,14 +200,18 @@ impl LocalCache {
                     }
                 }
             },
-            CacheMutation::Delete { key, revision } => {
+            CacheMutation::Delete {
+                store: _,
+                key,
+                revision,
+            } => {
                 if state.put_slot(key.to_vec(), LocalSlot::Missing { revision }) {
                     ApplyOutcome::Applied
                 } else {
                     ApplyOutcome::Ignored
                 }
             }
-            CacheMutation::Reset { revision } => {
+            CacheMutation::Reset { store: _, revision } => {
                 state.advance_floor(revision.sequence);
                 ApplyOutcome::Applied
             }

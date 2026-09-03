@@ -61,11 +61,14 @@ fn wait_until_readable(fd: &impl AsRawFd) -> bool {
 fn child_put_wakes_and_populates_parent_l1() {
     let name = fresh_name();
     let parent_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent fleet"));
-    let parent =
-        Cache::<DefaultCacheLayout>::with_default_capacity(parent_fleet).expect("parent cache");
-    parent.transport().reset_rings().expect("reset cache rings");
+    let parent_cache = Cache::<DefaultCacheLayout>::new(parent_fleet).expect("parent cache");
+    let parent = parent_cache.open_default_store().expect("parent store");
+    parent_cache
+        .transport()
+        .reset_rings()
+        .expect("reset cache rings");
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    let event_fd = parent.event_fd().expect("cache mutation eventfd");
+    let event_fd = parent_cache.event_fd().expect("cache mutation eventfd");
 
     match unsafe { fork() }.expect("fork") {
         ForkResult::Child => {
@@ -73,8 +76,12 @@ fn child_put_wakes_and_populates_parent_l1() {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(11),
             };
-            let child = match Cache::<DefaultCacheLayout>::with_default_capacity(child_fleet) {
+            let child_cache = match Cache::<DefaultCacheLayout>::new(child_fleet) {
                 Ok(cache) => cache,
+                Err(_) => std::process::exit(12),
+            };
+            let child = match child_cache.open_default_store() {
+                Ok(store) => store,
                 Err(_) => std::process::exit(12),
             };
             let value = vec![b'x'; 5_000];
@@ -91,9 +98,9 @@ fn child_put_wakes_and_populates_parent_l1() {
             }
 
             let child_code = wait_child(child);
-            let poll = parent.poll();
+            let poll = parent_cache.poll();
             let observed = parent.read(b"cross-process");
-            parent
+            parent_cache
                 .transport()
                 .unlink_rings()
                 .expect("unlink cache rings");
@@ -114,9 +121,13 @@ fn child_put_wakes_and_populates_parent_l1() {
 fn writers_in_different_lanes_converge_by_shared_revision() {
     let name = fresh_name();
     let parent_fleet = Arc::new(Fleet::join_shm_as(name, 2, NodeId::new(0)).expect("parent fleet"));
-    let parent = Cache::<DefaultCacheLayout>::with_default_capacity(parent_fleet.clone())
-        .expect("parent cache");
-    parent.transport().reset_rings().expect("reset cache rings");
+    let parent_cache =
+        Cache::<DefaultCacheLayout>::new(parent_fleet.clone()).expect("parent cache");
+    let parent = parent_cache.open_default_store().expect("parent store");
+    parent_cache
+        .transport()
+        .reset_rings()
+        .expect("reset cache rings");
     let observer =
         CacheTransport::<DefaultCacheLayout>::new(parent_fleet).expect("observer transport");
     let mut observer_cursor = observer.cursor_at_head();
@@ -133,8 +144,12 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
                 Ok(fleet) => Arc::new(fleet),
                 Err(_) => std::process::exit(22),
             };
-            let child = match Cache::<DefaultCacheLayout>::with_default_capacity(child_fleet) {
+            let child_cache = match Cache::<DefaultCacheLayout>::new(child_fleet) {
                 Ok(cache) => cache,
+                Err(_) => std::process::exit(23),
+            };
+            let child = match child_cache.open_default_store() {
+                Ok(store) => store,
                 Err(_) => std::process::exit(23),
             };
             if child.put(b"same-key", b"child", None).is_err() {
@@ -161,11 +176,11 @@ fn writers_in_different_lanes_converge_by_shared_revision() {
             };
             let expected = observer.read_payload(*payload).expect("winning payload");
 
-            let poll = parent.poll();
+            let poll = parent_cache.poll();
             let CacheRead::Hit(actual) = parent.read(b"same-key") else {
                 panic!("parent must retain the winning write");
             };
-            parent
+            parent_cache
                 .transport()
                 .unlink_rings()
                 .expect("unlink cache rings");
