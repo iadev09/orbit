@@ -1,4 +1,4 @@
-//! Native notification bridge for an SHM ring.
+//! Native readiness bridge for an SHM ring.
 //!
 //! The shared signal is a generation in the ring header, waited through Linux
 //! futex or FreeBSD umtx. Each process owns a private `eventfd` and a small

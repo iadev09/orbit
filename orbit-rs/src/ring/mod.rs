@@ -57,12 +57,12 @@ use crate::id::NetId64;
 
 pub mod cursor;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-mod event_fd;
+mod readiness;
 #[cfg(unix)]
 pub mod shm;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-pub use event_fd::RingEventFd;
+pub use readiness::RingEventFd;
 
 /// Writer ownership for one [`OrbitTyped`] ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
