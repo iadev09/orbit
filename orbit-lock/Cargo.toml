@@ -11,7 +11,7 @@ categories = ["concurrency"]
 
 [dependencies]
 bytes.workspace = true
-orbit-rs = { path = "../orbit-rs" }
+orbit-rs = { path = "../orbit-rs", version = "0.2.1" }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

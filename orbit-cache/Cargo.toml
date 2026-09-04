@@ -12,7 +12,7 @@ categories = ["caching", "concurrency"]
 [dependencies]
 bytes.workspace = true
 lru.workspace = true
-orbit-rs = { path = "../orbit-rs" }
+orbit-rs = { path = "../orbit-rs", version = "0.2.1" }
 
 [dev-dependencies]
 criterion.workspace = true

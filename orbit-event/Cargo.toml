@@ -12,7 +12,7 @@ documentation = "https://docs.rs/orbit-event"
 
 [dependencies]
 bytes.workspace = true
-orbit-rs = { path = "../orbit-rs" }
+orbit-rs = { path = "../orbit-rs", version = "0.2.1" }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc.workspace = true
