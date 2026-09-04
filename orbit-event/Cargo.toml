@@ -1,14 +1,13 @@
 [package]
 name = "orbit-event"
-version = "0.1.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-shared topic event streams over Orbit rings."
 license.workspace = true
 repository.workspace = true
-keywords = ["event", "shm", "fleet", "orbit"]
+keywords = ["event", "shm", "fleet", "orbit","ring"]
 categories = ["concurrency", "data-structures"]
-readme = "README.md"
 documentation = "https://docs.rs/orbit-event"
 
 [dependencies]

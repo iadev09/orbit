@@ -101,5 +101,3 @@ core.*
 !README.md
 !AGENTS.md
 !CLAUDE.md
-!/orbit-cache/ARCHITECTURE.md
-!/orbit-event/ARCHITECTURE.md

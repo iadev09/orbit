@@ -1,12 +1,12 @@
 [package]
 name = "orbit-cache"
-version = "0.1.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-coherent local cache over Orbit shared-memory rings."
 license.workspace = true
 repository.workspace = true
-keywords = ["cache", "shm", "fleet", "orbit"]
+keywords = ["cache", "shm", "fleet", "orbit","ring"]
 categories = ["caching", "concurrency"]
 
 [dependencies]

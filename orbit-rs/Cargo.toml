@@ -8,12 +8,10 @@ license.workspace = true
 repository.workspace = true
 keywords = ["fleet", "atomic", "orbital", "shm", "distributed"]
 categories = ["concurrency", "data-structures"]
-readme = "README.md"
 documentation = "https://docs.rs/orbit-rs"
 
 [dependencies]
 dashmap.workspace = true
-tracing.workspace = true
 bytes.workspace = true
 netid64.workspace = true
 

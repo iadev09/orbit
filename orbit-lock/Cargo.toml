@@ -1,12 +1,12 @@
 [package]
 name = "orbit-lock"
-version = "0.1.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 description = "Fleet-shared keyed locks over Orbit shared memory."
 license.workspace = true
 repository.workspace = true
-keywords = ["lock", "shm", "fleet", "orbit"]
+keywords = ["lock", "shm", "fleet", "orbit","ring"]
 categories = ["concurrency"]
 
 [dependencies]

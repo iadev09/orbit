@@ -6,8 +6,8 @@ authors.workspace = true
 description = "Metrics snapshot families over orbit-rs rings."
 license.workspace = true
 repository.workspace = true
-readme = "README.md"
 documentation = "https://docs.rs/orbit-metrics"
+keywords = ["metrics", "shm", "fleet", "orbit","ring"]
 
 [dependencies]
 bytes.workspace = true
