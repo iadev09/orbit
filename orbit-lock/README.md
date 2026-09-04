@@ -16,5 +16,3 @@ for caller-owned coordination policies.
 
 `LockKey` and cache keys are unrelated namespaces. Cache deletion or reset
 never changes lock state, and lock expiry or release never changes cache data.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete contract.

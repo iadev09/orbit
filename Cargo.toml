@@ -3,6 +3,7 @@ members = [
     "orbit-cache",
     "orbit-event",
     "orbit-lock",
+    "orbit-rustls",
     "orbit-rs",
     "orbit-metrics",
 ]
@@ -22,4 +23,5 @@ libc = "0.2"
 lru = "0.18"
 netid64 = "0.1.1"
 nix = { version = "0.31", features = ["process", "signal", "user", "fs"] }
+rustls = { version = "0.23.43", default-features = false, features = ["std"] }
 tracing = "0.1.44"

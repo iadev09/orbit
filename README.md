@@ -30,9 +30,9 @@ Typical use cases:
 
 ## Crates
 
-- `orbit-rs`: the substrate layer. It owns fleet membership, type-keyed rings,
-  POSIX shared-memory backing, notification bridges, batch publication, and
-  cursor/loss accounting.
+- [`orbit-rs`](orbit-rs/README.md): the substrate layer. It owns fleet
+  membership, type-keyed rings, POSIX shared-memory backing, notification
+  bridges, batch publication, and cursor/loss accounting.
 - [`orbit-cache`](orbit-cache/README.md): a fleet-coherent local byte cache
   built from a dedicated mutation ring and addressable multi-slot payload
   ring.
@@ -40,8 +40,11 @@ Typical use cases:
   payload event stream over one per-node ring.
 - [`orbit-lock`](orbit-lock/README.md): fleet-shared keyed locks backed by an
   authoritative current-state table and a notified transition ring.
-- `orbit-metrics`: a metrics snapshot layer built on top of `orbit-rs`.
-  It is a use-case crate, not part of the primitive core.
+- [`orbit-metrics`](orbit-metrics/README.md): a metrics snapshot layer built on
+  top of `orbit-rs`. It is a use-case crate, not part of the primitive core.
+- [`orbit-rustls`](orbit-rustls/README.md): rustls-specific shared runtime
+  state, beginning with a fleet-wide server-session store over an Orbit
+  current-state table.
 
 `orbit-rs` uses [`netid64`](https://github.com/iadev09/netid64) for
 runtime-bound frame identifiers: "valid for life" means valid for the
