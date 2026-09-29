@@ -1,5 +1,11 @@
 # orbit-rs
 
+`orbit-rs` has moved to [Orbitive](https://github.com/iadev09/orbitive).
+The primitive runtime now lives in the `orbit-core` package. New applications
+should enter through the `orbitive` facade; low-level integrations that need
+the complete primitive surface may depend on `orbit-core` directly. This
+package remains available for existing `orbit-rs` users.
+
 `orbit-rs` is the primitive Orbit crate: a same-host runtime substrate
 for recent facts shared by sibling processes.
 

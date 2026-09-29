@@ -1,11 +1,11 @@
 [package]
 name = "orbit-rs"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 authors.workspace = true
-description = "Fleet-aware shared-memory rings over POSIX shared memory."
+description = "Legacy Orbit primitives; development has moved to Orbitive."
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/iadev09/orbitive"
 keywords = ["fleet", "atomic", "orbital", "shm", "distributed"]
 categories = ["concurrency", "data-structures"]
 documentation = "https://docs.rs/orbit-rs"
